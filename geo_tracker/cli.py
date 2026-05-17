@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from geo_tracker.config import load_env
+from geo_tracker import reparse as reparse_mod
 from geo_tracker import runner, storage, summarize
 
 DEFAULT_DB = Path("geo-tracker.db")
@@ -68,6 +69,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    if args.concurrent < 1:
+        print(
+            f"ERROR: --concurrent must be >= 1 (got {args.concurrent})", file=sys.stderr
+        )
+        return 2
     load_env(Path(args.env) if args.env else None)
     summary = asyncio.run(
         runner.run(
@@ -85,7 +91,20 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_summary(args: argparse.Namespace) -> int:
     summary = summarize.summarize_run(Path(args.db), run_id=args.run_id)
+    if "error" in summary:
+        print(f"ERROR: {summary['error']}", file=sys.stderr)
+        return 1
     summarize.print_summary(summary)
+    return 0
+
+
+def cmd_reparse(args: argparse.Namespace) -> int:
+    result = reparse_mod.reparse(
+        Path(args.db),
+        Path(args.self_domains),
+        run_id=args.run_id,
+    )
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -120,6 +139,15 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--db", default=str(DEFAULT_DB))
     ps.add_argument("--run-id", type=int, help="Specific run (default: latest)")
     ps.set_defaults(func=cmd_summary)
+
+    prep = sub.add_parser(
+        "reparse",
+        help="Re-extract citations from historical raw responses using the current parser + self_domains",
+    )
+    prep.add_argument("--db", default=str(DEFAULT_DB))
+    prep.add_argument("--self-domains", default=str(DEFAULT_SELF))
+    prep.add_argument("--run-id", type=int, help="Limit to one run (default: all runs)")
+    prep.set_defaults(func=cmd_reparse)
 
     args = p.parse_args(argv)
     return args.func(args)

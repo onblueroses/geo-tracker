@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from pathlib import Path
 
 import yaml
 
 from geo_tracker.adapters import ALL_ADAPTERS, OpenRouterClient
-from geo_tracker.parser import parse_citations
+from geo_tracker.parser import extract_domain, parse_citations
 from geo_tracker.storage import init_db, insert_citations, insert_event, start_run
 
 log = logging.getLogger("geo_tracker.runner")
@@ -39,26 +40,49 @@ async def _run_cell(
     self_domains: set[str],
     sem: asyncio.Semaphore,
 ) -> tuple[str, str, int]:
-    """Run one cell. Returns (engine, fetch_status, n_citations)."""
+    """Run one cell. Returns (engine, fetch_status, n_citations).
+
+    Wrapped in a top-level try/except so any unexpected exception (parser bug,
+    adapter shape change, sqlite failure) still produces an `error` row.
+    """
     async with sem:
-        event = await adapter.query(prompt)
-        event_id = insert_event(
-            db_path,
-            run_id=run_id,
-            prompt=prompt,
-            engine=adapter.name,
-            model=adapter.model,
-            fetch_status=event.fetch_status,
-            fetch_error=event.fetch_error,
-            response_text=event.response_text,
-            raw_response=event.raw_response,
-            latency_ms=event.latency_ms,
-        )
-        n_cites = 0
-        if event.fetch_status == "ok":
-            citations = parse_citations(event.raw_response, self_domains)
-            n_cites = insert_citations(db_path, event_id, citations)
-        return adapter.name, event.fetch_status, n_cites
+        try:
+            event = await adapter.query(prompt)
+            event_id = insert_event(
+                db_path,
+                run_id=run_id,
+                prompt=prompt,
+                engine=adapter.name,
+                model=adapter.model,
+                fetch_status=event.fetch_status,
+                fetch_error=event.fetch_error,
+                response_text=event.response_text,
+                raw_response=event.raw_response,
+                latency_ms=event.latency_ms,
+            )
+            n_cites = 0
+            if event.fetch_status == "ok":
+                citations = parse_citations(event.raw_response, self_domains)
+                n_cites = insert_citations(db_path, event_id, citations)
+            return adapter.name, event.fetch_status, n_cites
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[:1000]}"
+            try:
+                insert_event(
+                    db_path,
+                    run_id=run_id,
+                    prompt=prompt,
+                    engine=adapter.name,
+                    model=adapter.model,
+                    fetch_status="error",
+                    fetch_error=err,
+                    response_text="",
+                    raw_response={},
+                    latency_ms=0,
+                )
+            except Exception:
+                log.exception("failed to record error event for %s", adapter.name)
+            return adapter.name, "error", 0
 
 
 async def run(
@@ -72,7 +96,18 @@ async def run(
     init_db(db_path)
     prompts = _load_yaml_list(prompts_path)
     self_domains_list = _load_yaml_list(self_domains_path)
-    self_domains = {str(d).lower().lstrip("www.") for d in self_domains_list}
+    # Normalize via extract_domain so we handle full URLs in self_domains.yaml
+    # too, and so 'www.' is stripped as a prefix (not a char set — `lstrip("www.")`
+    # would mangle "walmart.com" to "almart.com").
+    self_domains: set[str] = set()
+    for d in self_domains_list:
+        s = str(d).strip().lower()
+        if s.startswith("http://") or s.startswith("https://"):
+            s = extract_domain(s)
+        elif s.startswith("www."):
+            s = s[4:]
+        if s:
+            self_domains.add(s)
 
     client = OpenRouterClient()
     adapters = []

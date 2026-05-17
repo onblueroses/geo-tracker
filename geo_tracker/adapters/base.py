@@ -71,9 +71,16 @@ class OpenRouterClient:
             )
 
         latency_ms = int((time.monotonic() - started) * 1000)
-        choice = response.choices[0]
-        text = choice.message.content or ""
         raw = response.model_dump()
+        if not response.choices:
+            return EventPayload(
+                response_text="",
+                raw_response=raw,
+                latency_ms=latency_ms,
+                fetch_status="error",
+                fetch_error="empty choices array in OpenRouter response",
+            )
+        text = response.choices[0].message.content or ""
         return EventPayload(
             response_text=text,
             raw_response=raw,

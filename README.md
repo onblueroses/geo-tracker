@@ -1,8 +1,14 @@
 # geo-tracker
 
-Measure how often LLM answer engines (Perplexity, ChatGPT search, Claude search, Gemini search) cite *your* URLs when users ask the questions your audience would ask.
+When someone asks Perplexity or ChatGPT or Claude or Gemini a question your audience cares about, which URLs does the model actually cite? This tells you. Weekly. With receipts.
 
-GEO (Generative Engine Optimization) is what SEO became when the destination stopped being the search-results page and became the answer itself. You can't optimize what you don't measure. This is a small tool that measures it.
+SEO measured which page Google linked to. GEO measures which page got named inside the answer. Different game, different feedback loop. You can run a tool against the new game; this is one.
+
+## What it does
+
+For every prompt in your list, geo-tracker fires the question at four answer engines, captures the response and the citation set, tags each cited host as `self` (yours) or not, and writes everything to an append-only SQLite ledger. Re-run on Sundays; diff this week against last week.
+
+One API key (OpenRouter) covers all four engines. A cell typically costs a few cents (provider + search pricing varies); a sweep of forty prompts across four engines (160 cells) usually lands under five dollars and finishes in a couple of minutes.
 
 ```
 $ geo-tracker init && geo-tracker run --label baseline && geo-tracker summary
@@ -26,30 +32,24 @@ Top 10 cited domains:
   ...
 ```
 
-`*` = matches your `self_domains.yaml`.
+`*` flags hosts from your `self_domains.yaml`.
 
-## How it works
+## The four engines
 
-For every prompt × every engine, geo-tracker fires one query through OpenRouter (so you only need one API key for all four), captures the response + the citation list, classifies each cited domain as `self` or other, and writes everything to an append-only SQLite ledger. Re-run weekly to track movement.
+| Engine | OpenRouter model | Grounding |
+|--------|------------------|-----------|
+| Perplexity | `perplexity/sonar-pro` | native |
+| OpenAI | `openai/gpt-4o-mini:online` | OpenRouter web search |
+| Anthropic | `anthropic/claude-3.5-haiku:online` | OpenRouter web search |
+| Gemini | `google/gemini-2.5-flash:online` | OpenRouter web search |
 
-The four engines:
+The `:online` suffix tells OpenRouter to wrap a web-search loop around the model. All four return citations in the same normalized field (`choices[0].message.annotations[].url_citation`), so one parser handles every engine.
 
-| Engine | OpenRouter model |
-|--------|------------------|
-| Perplexity | `perplexity/sonar-pro` |
-| OpenAI (web search) | `openai/gpt-4o-mini:online` |
-| Anthropic (web search) | `anthropic/claude-3.5-haiku:online` |
-| Gemini (web search) | `google/gemini-2.5-flash:online` |
-
-The `:online` suffix activates OpenRouter's web-search augmentation; citations come back in a normalized shape (`choices[0].message.annotations[].url_citation`) so one parser handles all four.
+> **Note on OpenRouter drift.** OpenRouter is migrating from the `:online` suffix to a `plugins: [{id: web}]` request field. The annotation shape is the same, so this parser keeps working, but if the shortcut goes away in a future release we'll switch transports. Open an issue if you see it break.
 
 ## Install
 
-```bash
-pip install geo-tracker
-```
-
-Or from source:
+From source (the package isn't on PyPI yet):
 
 ```bash
 git clone https://github.com/onblueroses/geo-tracker
@@ -60,50 +60,59 @@ pip install -e .
 ## Usage
 
 ```bash
-# 1. Scaffold prompts.yaml, self_domains.yaml, .env, and an empty SQLite DB
-geo-tracker init
-
-# 2. Edit the YAML files with your prompts + domains
-# 3. Put OPENROUTER_API_KEY in .env (get a key at https://openrouter.ai/keys)
-
-# 4. Run one full sweep
-geo-tracker run --label "2026-W21-baseline"
-
-# 5. See the citation rollup
-geo-tracker summary
+geo-tracker init                       # scaffold prompts.yaml, self_domains.yaml, .env, empty DB
+$EDITOR prompts.yaml                   # the questions your audience would type
+$EDITOR self_domains.yaml              # your hosts
+$EDITOR .env                           # OPENROUTER_API_KEY=...
+geo-tracker run --label baseline       # query all engines for all prompts
+geo-tracker summary                    # citation rollup for the latest run
 ```
 
-A run with 10 prompts × 4 engines costs roughly $0.05 in OpenRouter credits and takes about 30 seconds with the default `--concurrent 5`.
+Useful flags:
+
+```
+geo-tracker run --engines perplexity,openai     # subset
+geo-tracker run --concurrent 10                 # parallel cells (default 5)
+geo-tracker summary --run-id 3                  # specific run
+geo-tracker reparse                             # re-extract citations from old raw responses
+geo-tracker reparse --run-id 3                  # ...for one run only
+```
+
+`reparse` is what you run after editing `self_domains.yaml` or bumping `parser.PARSER_VERSION`. It walks the stored raw responses, runs the current parser, and appends new citation rows tagged with the current version. The old rows stay; `summary` always uses the latest parser_version per run, so no double-counting.
+
+Get an OpenRouter key at <https://openrouter.ai/keys>.
 
 ## Run it weekly
 
-Drop it in cron:
+Cron entry:
 
 ```cron
 0 6 * * 0  cd /opt/geo-tracker && /opt/geo-tracker/.venv/bin/geo-tracker run --label "$(date -u +%Y-W%V)"
 ```
 
-The ledger is append-only, so every run is its own row in `runs` with all events + citations attached. Compare any two weeks by their `run_id`.
+Sunday 06:00 UTC, one sweep, ISO-week-tagged. Every run is its own row; compare any two weeks by `run_id`.
 
 ## Schema
 
-The SQLite DB has three tables (see `geo_tracker/storage.py`):
+Three tables in SQLite (`geo_tracker/storage.py`):
 
-- `runs(id, started_at, label, config_json)` — one row per invocation
-- `events(id, run_id, prompt, engine, model, fetch_status, response_text, raw_response_json, latency_ms, ...)` — one row per (run, prompt, engine) call. Failures still produce a row (`fetch_status` = `error` or `timeout`) so the ledger never has gaps.
-- `citations(id, event_id, parser_version, cited_url, cited_domain, rank, snippet, is_self)` — one row per cited URL.
+- `runs`: one row per invocation. id, started_at, label, config_json.
+- `events`: one row per (run, prompt, engine) call. Failures still produce a row with `fetch_status` set to `error` or `timeout` and the raw exception text captured. The ledger never has gaps.
+- `citations`: one row per cited URL. Includes `parser_version` so historical rows survive a parser upgrade.
 
-Bump `geo_tracker/parser.PARSER_VERSION` when you change the citation extractor; old citation rows keep their original version tag.
+If you change the citation extractor, bump `geo_tracker/parser.PARSER_VERSION` and run `geo-tracker reparse`. Old citation rows keep their original interpretation; new rows land alongside them tagged with the new version. `summary` uses the latest version per run.
 
-## Why an append-only ledger?
+## Why append-only
 
-Two reasons. First, you'll want to re-parse historical raw responses when you tweak classification (new self-domain? add it and re-run the parser). Second, comparing week N to week N+4 only works if you trust both as-recorded — overwriting kills longitudinal analysis.
+Two reasons. First, because you'll tweak `self_domains.yaml` and want to re-classify last month's data without re-paying OpenRouter, and the raw responses are right there (`geo-tracker reparse` does this). Second, comparing week N to week N+4 only works if both rows are exactly what came back at the time. Overwriting throws away the comparison.
 
 ## What this is not
 
-- Not a content generator. It tells you which URLs the engines cite; it doesn't write the content that gets cited.
-- Not an alerting system. It gives you a ledger; build the dashboard you want on top.
-- Not a way to game the engines. Treat its output as ground truth about your current visibility, then improve your underlying content.
+Not a content generator. It tells you which URLs the engines cite; it doesn't write the content that gets cited.
+
+It's not a dashboard either. The output is a SQLite file; point Metabase or Datasette or a notebook at it.
+
+And it can't game the engines. Treat the output as ground truth about your current visibility, then go improve the content the engines should have been citing.
 
 ## License
 

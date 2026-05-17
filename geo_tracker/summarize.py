@@ -24,6 +24,8 @@ def summarize_run(db_path: Path, run_id: int | None = None) -> dict:
         meta = conn.execute(
             "SELECT id, started_at, label FROM runs WHERE id = ?", (run_id,)
         ).fetchone()
+        if meta is None:
+            return {"error": f"run_id {run_id} not found"}
 
         # Per-engine cell counts (one cell = one (prompt, engine) call)
         engines = conn.execute(
@@ -32,29 +34,40 @@ def summarize_run(db_path: Path, run_id: int | None = None) -> dict:
             (run_id,),
         ).fetchall()
 
-        # Citation counts per domain across all engines
+        # Pick the latest parser_version present for this run so a reparse
+        # doesn't double-count alongside the original interpretation.
+        latest_pv_row = conn.execute(
+            """SELECT MAX(c.parser_version) AS pv FROM citations c
+               JOIN events e ON c.event_id = e.id
+               WHERE e.run_id = ?""",
+            (run_id,),
+        ).fetchone()
+        latest_pv = latest_pv_row["pv"] if latest_pv_row else None
+
+        # Citation counts per domain across all engines (latest parser_version only)
         domain_counts = conn.execute(
             """SELECT c.cited_domain, c.is_self, COUNT(*) AS n FROM citations c
                JOIN events e ON c.event_id = e.id
-               WHERE e.run_id = ?
+               WHERE e.run_id = ? AND c.parser_version = ?
                GROUP BY c.cited_domain
                ORDER BY n DESC""",
-            (run_id,),
+            (run_id, latest_pv),
         ).fetchall()
 
-        # Self-citation count per engine
+        # Self-citation count per engine (latest parser_version only)
         self_by_engine = conn.execute(
             """SELECT e.engine, COUNT(*) AS n FROM citations c
                JOIN events e ON c.event_id = e.id
-               WHERE e.run_id = ? AND c.is_self = 1
+               WHERE e.run_id = ? AND c.is_self = 1 AND c.parser_version = ?
                GROUP BY e.engine""",
-            (run_id,),
+            (run_id, latest_pv),
         ).fetchall()
 
     return {
         "run_id": run_id,
         "started_at": meta["started_at"],
         "label": meta["label"],
+        "parser_version": latest_pv,
         "cells_by_engine": [dict(r) for r in engines],
         "top_domains": [dict(r) for r in domain_counts[:30]],
         "self_cites_by_engine": [dict(r) for r in self_by_engine],
@@ -65,8 +78,9 @@ def print_summary(summary: dict) -> None:
     if "error" in summary:
         print(summary["error"])
         return
-    print(f"\n=== Run {summary['run_id']} — {summary['label'] or '(no label)'} ===")
-    print(f"started_at: {summary['started_at']}\n")
+    print(f"\n=== Run {summary['run_id']} ({summary['label'] or 'no label'}) ===")
+    print(f"started_at: {summary['started_at']}")
+    print(f"parser_version: {summary.get('parser_version', 'n/a')}\n")
 
     print("Cells per engine:")
     for r in summary["cells_by_engine"]:
