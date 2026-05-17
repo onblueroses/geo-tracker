@@ -1,0 +1,11 @@
+# Example prompts. Replace with what your audience actually asks.
+# Each prompt fires once per engine per run.
+
+- best open source vector database for production
+- compare postgres and clickhouse for analytics workloads
+- how to self-host an LLM gateway in 2026
+- which python async http library is fastest
+- best practices for SQLite write performance
+- when to use Kafka vs RabbitMQ
+- recommended observability stack for small teams
+- how does OpenRouter compare to LiteLLM

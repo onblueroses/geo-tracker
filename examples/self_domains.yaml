@@ -1,0 +1,5 @@
+# Your domains. Citations to these hosts are tagged is_self=1 in the ledger
+# and shown as a per-engine count in `geo-tracker summary`.
+
+- example.com
+- docs.example.com

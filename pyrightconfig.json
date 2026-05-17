@@ -1,0 +1,6 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["geo_tracker", "tests"],
+  "reportMissingImports": "warning"
+}
