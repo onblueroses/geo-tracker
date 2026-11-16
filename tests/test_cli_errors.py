@@ -100,3 +100,25 @@ def test_run_bad_prompts_file_writes_no_run(tmp_path: Path, monkeypatch: pytest.
     assert main(["run", *args]) == 2
     assert "no prompts" in capsys.readouterr().err
     assert not (tmp_path / "t.db").exists()
+
+
+def test_init_writes_brands_yaml(tmp_path: Path):
+    assert main(["init", "--dir", str(tmp_path)]) == 0
+    from geo_tracker.mentions import load_brands
+    assert [b.name for b in load_brands(tmp_path / "brands.yaml")] == ["Acme"]
+
+
+def test_run_rejects_missing_explicit_brands_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  capsys: pytest.CaptureFixture[str]):
+    args = _workspace(tmp_path, monkeypatch)
+    assert main(["run", *args, "--brands", str(tmp_path / "nope.yaml")]) == 2
+    assert "missing config file" in capsys.readouterr().err
+    assert not (tmp_path / "t.db").exists()
+
+
+def test_run_rejects_bad_brands_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                     capsys: pytest.CaptureFixture[str]):
+    args = _workspace(tmp_path, monkeypatch)
+    (tmp_path / "brands.yaml").write_text("[]\n", encoding="utf-8")
+    assert main(["run", *args, "--brands", str(tmp_path / "brands.yaml")]) == 2
+    assert "no brands" in capsys.readouterr().err

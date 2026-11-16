@@ -18,15 +18,16 @@ def _seed(db: Path, self_domains: set[str]) -> int:
     run_id = start_run(db, label="w1", config={})
     parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=self_domains)
     cells = [
-        ("perplexity", "ok", make_raw("https://example.com/a", "https://other.com/b")),
-        ("openai", "ok", make_raw("https://other.com/c")),
-        ("openai", "error", {}),
+        ("perplexity", "ok", make_raw("https://example.com/a", "https://other.com/b"),
+         "Acme on acme.io"),
+        ("openai", "ok", make_raw("https://other.com/c"), "Globex"),
+        ("openai", "error", {}, "Acme"),
     ]
-    for engine, status, raw in cells:
+    for engine, status, raw, text in cells:
         record_event(
             db, run_id=run_id, parse_id=parse_id, prompt="p", engine=engine, model="m",
             fetch_status=status, fetch_error=None if status == "ok" else "HTTP 500",
-            response_text="x", raw_response=raw, latency_ms=1,
+            response_text=text, raw_response=raw, latency_ms=1,
             citations=parse_citations(raw, self_domains) if status == "ok" else [],
         )
     return run_id
@@ -106,3 +107,36 @@ def test_summary_missing_db_is_not_created(tmp_path: Path):
 
 def test_summary_no_runs(db: Path):
     assert summarize_run(db)["error"] == "no runs yet"
+
+
+def _mention_rows(db: Path, parse_id: int) -> list[tuple[str, int]]:
+    with connect(db) as conn:
+        rows = conn.execute(
+            """SELECT e.engine, m.n FROM mentions m JOIN events e ON m.event_id = e.id
+               WHERE m.parse_id = ? ORDER BY e.engine""", (parse_id,)).fetchall()
+    return [tuple(r) for r in rows]
+
+
+def test_reparse_recomputes_mentions_without_double_counts(db: Path, self_domains_file: Path,
+                                                           tmp_path: Path):
+    _seed(db, {"example.com"})
+    brands = tmp_path / "brands.yaml"
+    brands.write_text("- name: Acme\n  aliases: [acme.io]\n", encoding="utf-8")
+    first = reparse(db, self_domains_file, brands_path=brands)
+    second = reparse(db, self_domains_file, brands_path=brands)
+    assert first["mentions_appended"] == second["mentions_appended"] == 1
+    # The seeded perplexity answer is "Acme on acme.io". The failed cell is skipped.
+    assert _mention_rows(db, first["parse_id"]) == [("perplexity", 2)]
+    assert _mention_rows(db, second["parse_id"]) == [("perplexity", 2)]
+    brands.write_text("- Globex\n", encoding="utf-8")
+    third = reparse(db, self_domains_file, brands_path=brands)
+    assert _mention_rows(db, third["parse_id"]) == [("openai", 1)]
+
+
+def test_reparse_without_brands_records_not_measured(db: Path, self_domains_file: Path):
+    _seed(db, {"example.com"})
+    result = reparse(db, self_domains_file)
+    assert result["brands"] is None
+    with connect(db) as conn:
+        assert conn.execute("SELECT brands_json FROM parses WHERE id = ?",
+                            (result["parse_id"],)).fetchone()[0] is None

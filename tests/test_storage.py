@@ -1,12 +1,14 @@
-"""Storage layer: round trip, NUL bytes, atomic writes, v0.1 migration."""
+"""Storage layer: round trip, NUL bytes, atomic writes, mentions, migrations."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
+from geo_tracker.mentions import MATCHER_VERSION, Brand, Mention
 from geo_tracker.parser import Citation
 from geo_tracker.storage import (
     connect,
@@ -108,3 +110,57 @@ def test_latest_parse_id_scopes(db: Path):
         assert latest_parse_id(conn, r1) == p1b
         assert latest_parse_id(conn, r2) == p2
     assert p1 < p_all < p2 < p1b
+
+
+def test_mentions_round_trip_tied_to_a_parse(db: Path):
+    run_id = start_run(db, label=None, config={})
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=[],
+                           brands=[Brand(name="Acme", aliases=("Acme", "acme.io"))])
+    record_event(
+        db, run_id=run_id, parse_id=parse_id, prompt="p", engine="e", model="m",
+        fetch_status="ok", fetch_error=None, response_text="Acme\x00", raw_response={},
+        latency_ms=1, mentions=[Mention(brand="Acme", count=2, first_match="Ac\x00me")],
+    )
+    with connect(db) as conn:
+        m = conn.execute("SELECT * FROM mentions").fetchone()
+        p = conn.execute("SELECT * FROM parses WHERE id = ?", (parse_id,)).fetchone()
+    assert (m["parse_id"], m["brand"], m["n"], m["first_match"]) == (parse_id, "Acme", 2, "Acme")
+    assert m["matcher_version"] == MATCHER_VERSION
+    assert json.loads(p["brands_json"]) == [{"name": "Acme", "aliases": ["Acme", "acme.io"]}]
+    assert p["matcher_version"] == MATCHER_VERSION
+
+
+def test_parse_without_brands_stores_null(db: Path):
+    """NULL means "not measured". It must differ from "measured, no mentions"."""
+    run_id = start_run(db, label=None, config={})
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=[])
+    with connect(db) as conn:
+        p = conn.execute("SELECT brands_json, matcher_version FROM parses WHERE id = ?",
+                         (parse_id,)).fetchone()
+    assert p["brands_json"] is None and p["matcher_version"] is None
+
+
+def test_init_db_migrates_v02_ledger(tmp_path: Path):
+    """A v0.2 ledger has `parses` without the brand columns and no `mentions` table."""
+    db = make_v01_db(tmp_path / "v02.db")
+    conn = sqlite3.connect(db)
+    conn.executescript(V02_PARSES)
+    conn.commit()
+    conn.close()
+    init_db(db)
+    init_db(db)
+    with connect(db) as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(parses)")}
+        row = conn.execute("SELECT * FROM parses").fetchone()
+        assert conn.execute("SELECT COUNT(*) FROM mentions").fetchone()[0] == 0
+    assert {"brands_json", "matcher_version"} <= cols
+    assert row["self_domains_json"] == '["example.com"]'
+    assert row["brands_json"] is None
+
+
+V02_PARSES = """
+CREATE TABLE parses (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+    run_id INTEGER REFERENCES runs(id), parser_version INTEGER NOT NULL,
+    self_domains_json TEXT NOT NULL);
+INSERT INTO parses VALUES (1, '2026-01-01', 1, 1, '["example.com"]');
+"""

@@ -1,14 +1,15 @@
 """SQLite-backed append-only ledger.
 
-Four tables:
+Five tables:
   - runs:       one row per `geo-tracker run` invocation
   - events:     one row per (run, prompt, engine) call, with raw_response
   - parses:     one row per parse pass (the first pass of a run, or a reparse)
   - citations:  one row per (event, cited_url, parse), with parser_version
+  - mentions:   one row per (event, brand, parse) for each brand the answer names
 
 The schema is append-only by design. Nothing is updated or deleted. A
-reparse adds a new parse row and new citation rows. Readers use the latest
-parse that covers a run, so a reparse never counts a citation twice.
+reparse adds a new parse row and new citation and mention rows. Readers use
+the latest parse that covers a run, so a reparse never counts a row twice.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from geo_tracker.mentions import MATCHER_VERSION, Brand, Mention, brands_config
 from geo_tracker.parser import Citation
 
 
@@ -64,12 +66,15 @@ CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_engine ON events(engine);
 
 -- run_id NULL means the parse covered every run that existed at created_at.
+-- brands_json NULL means the parse did not measure brand mentions.
 CREATE TABLE IF NOT EXISTS parses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,
     run_id INTEGER REFERENCES runs(id),
     parser_version INTEGER NOT NULL,
-    self_domains_json TEXT NOT NULL
+    self_domains_json TEXT NOT NULL,
+    brands_json TEXT,
+    matcher_version INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS citations (
@@ -85,6 +90,18 @@ CREATE TABLE IF NOT EXISTS citations (
 );
 CREATE INDEX IF NOT EXISTS idx_citations_event ON citations(event_id);
 CREATE INDEX IF NOT EXISTS idx_citations_domain ON citations(cited_domain);
+
+CREATE TABLE IF NOT EXISTS mentions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL REFERENCES events(id),
+    parse_id INTEGER NOT NULL REFERENCES parses(id),
+    matcher_version INTEGER NOT NULL,
+    brand TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    first_match TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mentions_event ON mentions(event_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_parse ON mentions(parse_id);
 """
 
 
@@ -104,15 +121,21 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def init_db(db_path: Path) -> None:
-    """Create the tables. Add `citations.parse_id` to a ledger from v0.1."""
+    """Create the tables. Add the newer columns to a ledger from v0.1 or v0.2."""
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(citations)")}
-        if "parse_id" not in cols:
-            conn.execute(
-                "ALTER TABLE citations ADD COLUMN parse_id INTEGER REFERENCES parses(id)"
-            )
+        _add_missing_columns(conn, "citations", {"parse_id": "INTEGER REFERENCES parses(id)"})
+        _add_missing_columns(
+            conn, "parses", {"brands_json": "TEXT", "matcher_version": "INTEGER"}
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_citations_parse ON citations(parse_id)"
         )
@@ -134,11 +157,21 @@ def insert_parse(
     run_id: int | None,
     parser_version: int,
     self_domains: Iterable[str],
+    brands: Iterable[Brand] | None = None,
 ) -> int:
+    """Add a parse row. `brands=None` records that mentions were not measured."""
     cur = conn.execute(
-        """INSERT INTO parses(created_at, run_id, parser_version, self_domains_json)
-           VALUES(?, ?, ?, ?)""",
-        (_now(), run_id, parser_version, json.dumps(sorted(self_domains))),
+        """INSERT INTO parses(created_at, run_id, parser_version, self_domains_json,
+            brands_json, matcher_version)
+           VALUES(?, ?, ?, ?, ?, ?)""",
+        (
+            _now(),
+            run_id,
+            parser_version,
+            json.dumps(sorted(self_domains)),
+            None if brands is None else json.dumps(_strip_nul(brands_config(brands))),
+            None if brands is None else MATCHER_VERSION,
+        ),
     )
     assert cur.lastrowid is not None
     return cur.lastrowid
@@ -150,6 +183,7 @@ def start_parse(
     run_id: int | None,
     parser_version: int,
     self_domains: Iterable[str],
+    brands: Iterable[Brand] | None = None,
 ) -> int:
     with connect(db_path) as conn:
         return insert_parse(
@@ -157,6 +191,7 @@ def start_parse(
             run_id=run_id,
             parser_version=parser_version,
             self_domains=self_domains,
+            brands=brands,
         )
 
 
@@ -220,6 +255,24 @@ def insert_citations(
     return n
 
 
+def insert_mentions(
+    conn: sqlite3.Connection,
+    event_id: int,
+    parse_id: int,
+    mentions: Iterable[Mention],
+) -> int:
+    n = 0
+    for m in mentions:
+        conn.execute(
+            """INSERT INTO mentions(event_id, parse_id, matcher_version, brand, n, first_match)
+               VALUES(?, ?, ?, ?, ?, ?)""",
+            (event_id, parse_id, MATCHER_VERSION, _strip_nul(m.brand), m.count,
+             _strip_nul(m.first_match)),
+        )
+        n += 1
+    return n
+
+
 def record_event(
     db_path: Path,
     *,
@@ -234,8 +287,9 @@ def record_event(
     raw_response: dict[str, Any],
     latency_ms: int,
     citations: Iterable[Citation] = (),
+    mentions: Iterable[Mention] = (),
 ) -> int:
-    """Write one event and its citations in one transaction."""
+    """Write one event, its citations and its mentions in one transaction."""
     with connect(db_path) as conn:
         event_id = insert_event(
             conn,
@@ -250,6 +304,7 @@ def record_event(
             latency_ms=latency_ms,
         )
         insert_citations(conn, event_id, parse_id, citations)
+        insert_mentions(conn, event_id, parse_id, mentions)
         return event_id
 
 

@@ -23,6 +23,7 @@ from geo_tracker.adapters import (
     OpenRouterClient,
     select_engines,
 )
+from geo_tracker.mentions import Brand, Mention, find_mentions, load_brands
 from geo_tracker.parser import (
     PARSER_VERSION,
     Citation,
@@ -76,11 +77,13 @@ async def _run_cell(
     prompt: str,
     self_domains: set[str],
     sem: asyncio.Semaphore,
+    brands: list[Brand] | None = None,
 ) -> tuple[str, str, int]:
     """Run one cell. Returns (engine, fetch_status, n_citations).
 
     The cell fails closed. An adapter exception becomes an `error` row. A
-    parser exception becomes a `parse_error` row that keeps the raw response.
+    parser or matcher exception becomes a `parse_error` row that keeps the
+    raw response.
     A storage failure rolls back and leaves an `error` row in its place.
     """
     async with sem:
@@ -94,11 +97,15 @@ async def _run_cell(
         status: str = event.fetch_status
         error = event.fetch_error
         citations: list[Citation] = []
+        mentions: list[Mention] = []
         if status == "ok":
             try:
                 citations = parse_citations(event.raw_response, self_domains)
+                if brands is not None:
+                    mentions = find_mentions(event.response_text, brands)
             except Exception as exc:
                 status, error = "parse_error", _describe(exc)
+                citations, mentions = [], []
 
         try:
             record_event(
@@ -114,6 +121,7 @@ async def _run_cell(
                 raw_response=event.raw_response,
                 latency_ms=event.latency_ms,
                 citations=citations,
+                mentions=mentions,
             )
         except Exception as exc:
             try:
@@ -143,9 +151,12 @@ async def run(
     label: str | None = None,
     engines: list[str] | None = None,
     max_concurrent: int = 5,
+    brands_path: Path | None = None,
 ) -> dict[str, Any]:
+    """Run every cell. With `brands_path=None` the run does not measure mentions."""
     prompts = load_prompts(prompts_path)
     self_domains = load_self_domains(self_domains_path)
+    brands = load_brands(brands_path) if brands_path is not None else None
     selected = select_engines(engines)
 
     init_db(db_path)
@@ -159,6 +170,7 @@ async def run(
             "n_prompts": len(prompts),
             "engines": {a.name: a.model for a in adapters},
             "self_domains": sorted(self_domains),
+            "brands": [b.name for b in brands] if brands is not None else None,
             "max_concurrent": max_concurrent,
         },
     )
@@ -167,11 +179,12 @@ async def run(
         run_id=run_id,
         parser_version=PARSER_VERSION,
         self_domains=self_domains,
+        brands=brands,
     )
 
     sem = asyncio.Semaphore(max_concurrent)
     tasks = [
-        _run_cell(db_path, run_id, parse_id, adapter, prompt, self_domains, sem)
+        _run_cell(db_path, run_id, parse_id, adapter, prompt, self_domains, sem, brands)
         for prompt in prompts
         for adapter in adapters
     ]

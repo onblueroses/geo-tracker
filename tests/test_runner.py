@@ -11,6 +11,7 @@ import pytest
 
 from geo_tracker import runner
 from geo_tracker.adapters import EventPayload
+from geo_tracker.mentions import Brand
 from geo_tracker.storage import connect, start_parse, start_run
 from conftest import make_raw
 
@@ -102,3 +103,40 @@ def test_load_prompts_rejects_bad_entries(tmp_path: Path):
     assert runner.load_prompts(p) == ["padded"]
     with pytest.raises(FileNotFoundError):
         runner.load_prompts(tmp_path / "missing.yaml")
+
+
+def test_ok_cell_writes_mentions_for_its_parse(db: Path):
+    ok = EventPayload(response_text="Acme and acme.io, not Acmeville.",
+                      raw_response=make_raw(), fetch_status="ok")
+    brands = [Brand(name="Acme", aliases=("Acme", "acme.io"))]
+    run_id = start_run(db, label="t", config={})
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=[], brands=brands)
+    asyncio.run(runner._run_cell(db, run_id, parse_id, FakeAdapter(ok), "p", set(),
+                                 asyncio.Semaphore(1), brands))
+    with connect(db) as conn:
+        rows = conn.execute("SELECT parse_id, brand, n FROM mentions").fetchall()
+    assert [tuple(r) for r in rows] == [(parse_id, "Acme", 2)]
+
+
+def test_failed_cell_writes_no_mentions(db: Path):
+    bad = EventPayload(response_text="Acme", fetch_status="error", fetch_error="HTTP 500")
+    brands = [Brand(name="Acme", aliases=("Acme",))]
+    run_id = start_run(db, label="t", config={})
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=[], brands=brands)
+    asyncio.run(runner._run_cell(db, run_id, parse_id, FakeAdapter(bad), "p", set(),
+                                 asyncio.Semaphore(1), brands))
+    with connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM mentions").fetchone()[0] == 0
+
+
+def test_matcher_failure_writes_one_parse_error_row(db: Path):
+    ok = EventPayload(response_text="Acme", raw_response=make_raw(), fetch_status="ok")
+    brands = [Brand(name="Acme", aliases=("Acme",))]
+    run_id = start_run(db, label="t", config={})
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=[], brands=brands)
+    with patch("geo_tracker.runner.find_mentions", side_effect=RuntimeError("boom")):
+        _, status, _ = asyncio.run(runner._run_cell(
+            db, run_id, parse_id, FakeAdapter(ok), "p", set(), asyncio.Semaphore(1), brands))
+    assert status == "parse_error"
+    with connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM mentions").fetchone()[0] == 0
