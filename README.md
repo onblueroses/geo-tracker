@@ -11,20 +11,22 @@ For each prompt in your list, geo-tracker does these steps:
 3. It tags each cited host as `self` (yours) or not.
 4. It writes all of it to an append-only SQLite ledger.
 
-One OpenRouter key covers all four engines. A sweep of forty prompts across four engines (160 cells) usually costs less than five dollars. Provider and search pricing varies, so see [Cost](docs/details.md#cost).
+A failed call gets its own row with the error. geo-tracker never counts a failed call as an answer that does not cite you.
 
 ```text
 $ geo-tracker init && geo-tracker run --label baseline && geo-tracker summary
 
-Self-citations per engine:
-  perplexity        3
-  openai            1
+Self-citations per engine (cells citing you / ok cells, citations):
+  anthropic          0 / 7        0  (1 failed, not counted)
+  gemini             0 / 8        0
+  openai             1 / 8        1
+  perplexity         3 / 8        4
 
-Top 10 cited domains:
-  github.com                                 17
-  example.com                                 4 *
-  docs.example.com                            2 *
-  ...
+Top 4 cited domains:
+  github.com                                  17
+  example.com                                  4 *
+  docs.example.com                             2 *
+  postgresql.org                               2
 ```
 
 `*` flags hosts from your `self_domains.yaml`.
@@ -34,20 +36,22 @@ Top 10 cited domains:
 | Engine | OpenRouter model | Grounding |
 |--------|------------------|-----------|
 | Perplexity | `perplexity/sonar-pro` | native |
-| OpenAI | `openai/gpt-4o-mini:online` | OpenRouter web search |
-| Anthropic | `anthropic/claude-3.5-haiku:online` | OpenRouter web search |
-| Gemini | `google/gemini-2.5-flash:online` | OpenRouter web search |
+| OpenAI | `openai/gpt-6-luna:online` | OpenRouter web plugin |
+| Anthropic | `anthropic/claude-haiku-5.5:online` | OpenRouter web plugin |
+| Gemini | `google/gemini-4-hydrogen:online` | OpenRouter web plugin |
 
-All four return citations in the same field, so one parser handles every engine. OpenRouter is moving away from the `:online` suffix. [Grounding and OpenRouter drift](docs/details.md#grounding-and-openrouter-drift) explains the effect.
+We checked these IDs against the [OpenRouter model list](https://openrouter.ai/api/v1/models) on 2026-11-16. For OpenAI, Anthropic and Google, each is the current fast, low-cost model. Perplexity keeps Sonar Pro. For these providers, the web plugin uses the native search of the provider. All four return citations in the same field, so one parser handles every engine. [Grounding](docs/details.md#grounding) gives more detail.
+
+One OpenRouter key covers all four engines. [Cost](docs/details.md#cost) gives the search fees.
 
 ## Install
 
-The package is not on PyPI yet. Install it from source (Python 3.10 or newer):
+The package is not on PyPI yet. Install it from source (Python 3.11 or newer):
 
 ```bash
 git clone https://github.com/onblueroses/geo-tracker
 cd geo-tracker
-pip install -e .
+pip install -e .        # or: uv sync
 ```
 
 ## Usage
@@ -62,7 +66,18 @@ geo-tracker summary                    # citation rollup for the latest run
 geo-tracker reparse                    # re-extract citations from stored raw responses
 ```
 
+`run` exits with code 1 if one or more cells failed. The failed cells are in the ledger with their error. Re-run to retry them.
+
 Get an OpenRouter key at <https://openrouter.ai/keys>. [geo-tracker in detail](docs/details.md) gives all flags, a weekly cron entry, the schema and the reasons for the append-only design.
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest
+```
+
+The tests make no network calls and use no API key.
 
 ## Layout
 
