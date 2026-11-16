@@ -4,25 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geo-tracker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Measure how often LLM answer engines cite your URLs."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "onblueroses" }]
 keywords = ["geo", "aeo", "llm", "seo", "openrouter", "perplexity", "answer-engines"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
 ]
 dependencies = [
-    "openai>=1.40",
-    "httpx>=0.27",
+    "openai>=3.0",
     "pydantic>=2.5",
     "PyYAML>=6.0",
     "python-dotenv>=1.0",
@@ -36,6 +36,9 @@ geo-tracker = "geo_tracker.cli:main"
 
 [project.urls]
 Repository = "https://github.com/onblueroses/geo-tracker"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["geo_tracker*"]
