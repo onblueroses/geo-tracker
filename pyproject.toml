@@ -29,7 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bedrock = ["boto3>=1.44"]
+bedrock = ["boto3>=1.44"]  # 1.44 is the tested version, not a measured minimum
 dev = ["pytest>=8", "boto3>=1.44"]
 
 [project.scripts]
