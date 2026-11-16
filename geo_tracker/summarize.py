@@ -141,18 +141,21 @@ def print_summary(summary: dict[str, Any]) -> None:
     brands = summary["brands"]
     print(f"brands: {', '.join(brands) if brands is not None else 'not measured'}\n")
 
+    names = [r["engine"] for r in summary["cells_by_status"]] + list(summary["engines"])
+    w = max([14, *map(len, names)])  # 14 fits the OpenRouter names; longer names widen it
+
     print("Cells per engine:")
     for r in summary["cells_by_status"]:
-        print(f"  {r['engine']:14s}  {r['fetch_status']:11s}  {r['n']:4d}")
+        print(f"  {r['engine']:{w}s}  {r['fetch_status']:11s}  {r['n']:4d}")
 
     print("\nPer engine, ok cells only (cells citing you, citations, cells mentioning you):")
-    print(f"  {'engine':14s}  {'cite you':>11s}  {'cites':>5s}  {'mention you':>11s}")
+    print(f"  {'engine':{w}s}  {'cite you':>11s}  {'cites':>5s}  {'mention you':>11s}")
     for engine, d in summary["engines"].items():
         failed = f"  ({d['failed']} failed, not counted)" if d["failed"] else ""
         cm = d["cells_mentioning"]
         mention = f"{cm:4d} / {d['ok']:<4d}" if cm is not None else f"{'-':>4s}{'':7s}"
         line = (
-            f"  {engine:14s}  {d['cells_citing_self']:4d} / {d['ok']:<4d}"
+            f"  {engine:{w}s}  {d['cells_citing_self']:4d} / {d['ok']:<4d}"
             f"  {d['self_citations']:5d}  {mention}{failed}"
         )
         print(line.rstrip())
