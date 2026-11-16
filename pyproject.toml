@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geo-tracker"
-version = "0.2.0"
-description = "Measure how often LLM answer engines cite your URLs."
+version = "0.3.0"
+description = "Measure how often LLM answer engines cite your URLs and mention your brand."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"

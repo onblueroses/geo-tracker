@@ -1,0 +1,9 @@
+# Your brand names. An answer mentions you if its text contains one of these
+# names as a whole word, in any letter case. "Acme" does not match "Acmeville".
+# An entry is a name, or a name with aliases. Each brand is counted apart.
+
+- name: Acme
+  aliases:
+    - Acme Cloud
+    - acme.example
+- Acme Labs

@@ -166,7 +166,7 @@ def cmd_reparse(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="geo-tracker",
-        description="Measure how often LLM answer engines cite your URLs.",
+        description="Measure how often LLM answer engines cite your URLs and mention your brand.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 

@@ -48,6 +48,7 @@ $ geo-tracker init && geo-tracker run --label baseline && geo-tracker summary
 === Run 1 (baseline) ===
 started_at: 2026-11-16T06:00:04+00:00
 parse: 1 (parser_version 1)
+brands: Acme, Acme Labs
 
 Cells per engine:
   anthropic       error           1
@@ -56,11 +57,12 @@ Cells per engine:
   openai          ok              8
   perplexity      ok              8
 
-Self-citations per engine (cells citing you / ok cells, citations):
-  anthropic          0 / 7        0  (1 failed, not counted)
-  gemini             0 / 8        0
-  openai             1 / 8        1
-  perplexity         3 / 8        4
+Per engine, ok cells only (cells citing you, citations, cells mentioning you):
+  engine             cite you  cites  mention you
+  anthropic          0 / 7         0     2 / 7     (1 failed, not counted)
+  gemini             0 / 8         0     1 / 8
+  openai             1 / 8         1     3 / 8
+  perplexity         3 / 8         4     5 / 8
 
 Top 4 cited domains:
   github.com                                  17
@@ -69,7 +71,36 @@ Top 4 cited domains:
   postgresql.org                               2
 ```
 
-`*` flags hosts from your `self_domains.yaml`. A "cell" is one call for one (prompt, engine) pair. The self-citation line counts only `ok` cells. It shows the failed cells next to the count, so a failure never looks like "not cited".
+`*` flags hosts from your `self_domains.yaml`. A "cell" is one call for one (prompt, engine) pair. The per-engine table counts only `ok` cells. It shows the failed cells next to the counts, so a failure never looks like "not cited" or "not mentioned".
+
+"mention you" counts the `ok` cells whose answer text names one or more of your brands. A cell that names a brand three times counts once. A dash means that the parse did not measure mentions, because it had no `brands.yaml`.
+
+## Brand mentions
+
+List your brand names in `brands.yaml`. An entry is a name, or a name with aliases:
+
+```yaml
+- name: Acme
+  aliases:
+    - Acme Cloud
+    - acme.example
+- Acme Labs
+```
+
+geo-tracker counts each brand apart. The aliases of a brand count for that brand. These rules apply:
+
+- The match ignores letter case. "ACME" and "acme" match "Acme".
+- The name must be a whole word. The character before and after it must not be a letter, a digit or an underscore. This applies to letters in all scripts.
+- Thus "Acme" matches "Acme's", "(acme)" and "Acme-based". It does not match "Acmeville", "MyAcme" or "acme2".
+- A dot or space in a name matches only that dot or space. "Acme Cloud" does not match "Acme  Cloud" with two spaces.
+- geo-tracker normalizes the text and the names to Unicode NFC first. Thus a composed and a decomposed "é" are the same letter.
+- If two names of one brand overlap, the longer name wins. "Acme Cloud" is one mention, not two.
+
+geo-tracker reads only the answer text, not the cited URLs or their titles. A cited host from your domain is a citation, not a mention.
+
+By default, `run` and `reparse` read `./brands.yaml`. Use `--brands PATH` to give a different file. If you give a path that does not exist, geo-tracker stops with exit code 2. If `./brands.yaml` does not exist and you give no path, geo-tracker does not measure mentions. It prints a note and records the parse as "not measured". An empty brands file is an error.
+
+If you change the matching rule, increase `geo_tracker/mentions.MATCHER_VERSION`. Each mention row stores the version that made it.
 
 ## Flags
 
@@ -79,11 +110,14 @@ geo-tracker run --concurrent 10                 # parallel cells (default 5)
 geo-tracker summary --run-id 3                  # specific run
 geo-tracker reparse                             # re-extract citations from old raw responses
 geo-tracker reparse --run-id 3                  # ...for one run only
+geo-tracker run --brands brands/acme.yaml       # brands file (default ./brands.yaml)
 ```
 
 `--engines` rejects a name that it does not know. It does not skip the name.
 
-Run `reparse` after you edit `self_domains.yaml` or increase `parser.PARSER_VERSION`. It reads the stored raw responses and runs the current parser. Then it appends one new parse with its citation rows. The old rows stay. `summary` always uses the latest parse of a run, so it does not count a citation twice.
+Run `reparse` after you edit `self_domains.yaml` or `brands.yaml`, or increase `parser.PARSER_VERSION`. It reads the stored responses and runs the current parser and matcher. Then it appends one new parse with its citation and mention rows. The old rows stay. `summary` always uses the latest parse of a run, so it does not count a citation or a mention twice.
+
+`reparse` also adds mentions to runs from before v0.3, because their answer text is in the ledger.
 
 ## Exit codes
 
@@ -102,7 +136,7 @@ geo-tracker fails closed. It records a failure as a failure, never as an answer 
 - `ok`: the engine returned answer text.
 - `timeout`: the call did not finish in time.
 - `error`: the API call failed, the response had an error, or the answer text was empty.
-- `parse_error`: the parser failed. The row keeps the raw response for inspection.
+- `parse_error`: the parser or the brand matcher failed. The row keeps the raw response for inspection.
 
 The OpenAI SDK retries connection errors, rate limits and server errors with its default policy. geo-tracker does not retry a cell after that. Re-run to retry.
 
@@ -120,22 +154,23 @@ This runs one sweep at Sunday 06:00 UTC, with the ISO week as label. Every run i
 
 ## Schema
 
-SQLite has four tables (`geo_tracker/storage.py`):
+SQLite has five tables (`geo_tracker/storage.py`):
 
 - `runs`: one row per invocation. Columns: id, started_at, label, config_json.
 - `events`: one row per (run, prompt, engine) call. A failure also makes a row, with its `fetch_status` and the error text. The ledger never has gaps.
-- `parses`: one row per parse pass. A run makes its first parse. Each `reparse` adds one more. `run_id` is empty when a reparse covers all runs.
+- `parses`: one row per parse pass. A run makes its first parse. Each `reparse` adds one more. `run_id` is empty when a reparse covers all runs. `brands_json` holds the brands of the parse. It is empty when the parse did not measure mentions.
 - `citations`: one row per cited URL in one parse. It includes `parse_id` and `parser_version`, so historical rows survive a parser upgrade.
+- `mentions`: one row per brand that one answer names, in one parse. It holds the brand, the number of matches, the first matched text, `parse_id` and `matcher_version`.
 
 If you change the citation extractor, increase `geo_tracker/parser.PARSER_VERSION` and run `geo-tracker reparse`. Old citation rows keep their original interpretation. New rows go next to them with the new parse. `summary` uses the latest parse per run.
 
-A ledger from v0.1 gets the `parses` table and the `citations.parse_id` column the next time geo-tracker opens it. Its old rows do not change. Until you run `reparse`, `summary` reads an old run by its highest `parser_version`.
+A ledger from v0.1 gets the `parses` table and the `citations.parse_id` column the next time geo-tracker opens it. A ledger from v0.1 or v0.2 also gets the `mentions` table and the brand columns of `parses`. Its old rows do not change. Until you run `reparse`, `summary` reads an old run by its highest `parser_version` and shows its mentions as not measured.
 
 ## Why append-only
 
 There are two reasons:
 
-1. You will change `self_domains.yaml` and want to re-classify last month's data without paying OpenRouter again. The raw responses are in the ledger, and `geo-tracker reparse` does this.
+1. You will change `self_domains.yaml` or `brands.yaml` and want to re-classify last month's data without paying OpenRouter again. The raw responses are in the ledger, and `geo-tracker reparse` does this.
 2. A comparison of week N to week N+4 works only if both rows are exactly what came back at the time. An overwrite removes the comparison.
 
 ## What this is not
