@@ -1,16 +1,17 @@
 """Extract URL citations from an OpenRouter event and classify each domain.
 
-OpenRouter normalizes citations across all four `:online` engines into a
-single shape: `choices[0].message.annotations[].url_citation.{url,title,content}`.
-Perplexity sonar uses the same shape.
+OpenRouter normalizes citations for all `:online` engines into one shape:
+`choices[0].message.annotations[].url_citation.{url,title,content}`.
+Perplexity Sonar uses the same shape.
 
-Bump PARSER_VERSION when the extraction logic changes — old rows keep their
-parser_version so you can re-parse historical raw responses without losing
+Bump PARSER_VERSION when the extraction logic changes. Old rows keep their
+parser_version, so you can re-parse historical raw responses without losing
 the original interpretation.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -29,14 +30,30 @@ class Citation:
 
 
 def extract_domain(url: str) -> str:
-    """Lowercase host, leading 'www.' stripped, port + path discarded."""
+    """Lowercase host, leading 'www.' stripped, port and path discarded."""
     if not url or not isinstance(url, str):
         return ""
     parsed = urlparse(url.strip())
     host = (parsed.hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host
+    return host.removeprefix("www.")
+
+
+def normalize_self_domains(items: Iterable[object]) -> set[str]:
+    """Normalize the entries of self_domains.yaml to bare hosts.
+
+    Accepts bare hosts and full URLs. Strips 'www.' as a prefix, not as a
+    character set: `lstrip("www.")` would turn "walmart.com" into "almart.com".
+    """
+    out: set[str] = set()
+    for item in items:
+        s = str(item).strip().lower()
+        if s.startswith(("http://", "https://")):
+            s = extract_domain(s)
+        else:
+            s = s.removeprefix("www.")
+        if s:
+            out.add(s)
+    return out
 
 
 def parse_citations(

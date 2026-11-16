@@ -1,6 +1,6 @@
-"""Citation parser tests."""
+"""Citation parser and self-domain normalization."""
 
-from geo_tracker.parser import extract_domain, parse_citations
+from geo_tracker.parser import extract_domain, normalize_self_domains, parse_citations
 
 
 def test_extract_domain_strips_www_and_path():
@@ -30,31 +30,48 @@ def test_parse_openrouter_shape():
                         },
                         {
                             "type": "url_citation",
-                            "url_citation": {
-                                "url": "https://other.com/x",
-                                "title": "Other",
-                            },
+                            "url_citation": {"url": "https://other.com/x", "title": "Other"},
                         },
-                        # duplicate url — should be deduped
-                        {
-                            "type": "url_citation",
-                            "url_citation": {"url": "https://example.com/post"},
-                        },
+                        # duplicate url: deduped
+                        {"type": "url_citation", "url_citation": {"url": "https://example.com/post"}},
+                        # other annotation types: skipped
+                        {"type": "file", "file": {"name": "x"}},
+                        "not-a-dict",
                     ]
                 }
             }
         ]
     }
     cites = parse_citations(raw, self_domains={"example.com"})
-    assert len(cites) == 2
-    assert cites[0].cited_domain == "example.com"
-    assert cites[0].is_self is True
-    assert cites[0].rank == 1
-    assert cites[1].cited_domain == "other.com"
-    assert cites[1].is_self is False
+    assert [(c.cited_domain, c.rank, c.is_self) for c in cites] == [
+        ("example.com", 1, True),
+        ("other.com", 2, False),
+    ]
+    assert cites[0].snippet == "Some snippet"
+    assert cites[1].snippet == "Other"
+
+
+def test_parse_truncates_snippet():
+    raw = {"choices": [{"message": {"annotations": [
+        {"type": "url_citation", "url_citation": {"url": "https://a.com", "content": "x" * 900}}
+    ]}}]}
+    assert len(parse_citations(raw, set())[0].snippet or "") == 500
 
 
 def test_parse_empty_response():
     assert parse_citations({}, set()) == []
     assert parse_citations({"choices": []}, set()) == []
     assert parse_citations({"choices": [{"message": {}}]}, set()) == []
+
+
+def test_self_domain_normalization_preserves_words_starting_with_w():
+    """Regression: `.lstrip("www.")` ate the 'w', 'a', 'l' from "walmart.com"."""
+    norm = normalize_self_domains(
+        ["walmart.com", "webflow.com", "www2.example.com", "www.example.com"]
+    )
+    assert norm == {"walmart.com", "webflow.com", "www2.example.com", "example.com"}
+
+
+def test_self_domain_normalization_accepts_full_urls():
+    norm = normalize_self_domains(["https://docs.example.com/api", "http://www.example.com", "  "])
+    assert norm == {"docs.example.com", "example.com"}
