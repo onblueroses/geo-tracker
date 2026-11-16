@@ -1,7 +1,8 @@
-"""Read a run from the ledger and produce a citation summary."""
+"""Read a run from the ledger and produce a citation and mention summary."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -65,13 +66,24 @@ def summarize_run(db_path: Path, run_id: int | None = None) -> dict[str, Any]:
             (run_id,),
         ).fetchall()
 
-        engines: dict[str, dict[str, int]] = {}
+        # A parse with brands_json NULL (or a v0.1 run) did not measure mentions.
+        pid = parse_info["parse_id"]
+        brands_json = None
+        if pid is not None:
+            brands_json = conn.execute(
+                "SELECT brands_json FROM parses WHERE id = ?", (pid,)
+            ).fetchone()["brands_json"]
+        brands = [b["name"] for b in json.loads(brands_json)] if brands_json else None
+
+        engines: dict[str, dict[str, int | None]] = {}
         for r in cells:
             d = engines.setdefault(
                 r["engine"],
-                {"ok": 0, "failed": 0, "cells_citing_self": 0, "self_citations": 0},
+                {"ok": 0, "failed": 0, "cells_citing_self": 0, "self_citations": 0,
+                 "cells_mentioning": 0 if brands is not None else None},
             )
-            d["ok" if r["fetch_status"] == "ok" else "failed"] += r["n"]
+            key = "ok" if r["fetch_status"] == "ok" else "failed"
+            d[key] = (d[key] or 0) + r["n"]
 
         self_rows = conn.execute(
             f"""SELECT e.engine, COUNT(DISTINCT e.id) AS cells, COUNT(*) AS n
@@ -85,6 +97,17 @@ def summarize_run(db_path: Path, run_id: int | None = None) -> dict[str, Any]:
             d = engines[r["engine"]]
             d["cells_citing_self"] = r["cells"]
             d["self_citations"] = r["n"]
+
+        if brands is not None:
+            mention_rows = conn.execute(
+                """SELECT e.engine, COUNT(DISTINCT e.id) AS cells
+                   FROM mentions m JOIN events e ON m.event_id = e.id
+                   WHERE e.run_id = ? AND e.fetch_status = 'ok' AND m.parse_id = ?
+                   GROUP BY e.engine""",
+                (run_id, pid),
+            ).fetchall()
+            for r in mention_rows:
+                engines[r["engine"]]["cells_mentioning"] = r["cells"]
 
         domain_counts = conn.execute(
             f"""SELECT c.cited_domain, MAX(c.is_self) AS is_self, COUNT(*) AS n
@@ -101,6 +124,7 @@ def summarize_run(db_path: Path, run_id: int | None = None) -> dict[str, Any]:
         "started_at": meta["started_at"],
         "label": meta["label"],
         **parse_info,
+        "brands": brands,
         "cells_by_status": [dict(r) for r in cells],
         "engines": engines,
         "top_domains": [dict(r) for r in domain_counts],
@@ -112,20 +136,26 @@ def print_summary(summary: dict[str, Any]) -> None:
     print(f"started_at: {summary['started_at']}")
     print(
         f"parse: {summary['parse_id'] if summary['parse_id'] is not None else 'legacy'}"
-        f" (parser_version {summary['parser_version']})\n"
+        f" (parser_version {summary['parser_version']})"
     )
+    brands = summary["brands"]
+    print(f"brands: {', '.join(brands) if brands is not None else 'not measured'}\n")
 
     print("Cells per engine:")
     for r in summary["cells_by_status"]:
         print(f"  {r['engine']:14s}  {r['fetch_status']:11s}  {r['n']:4d}")
 
-    print("\nSelf-citations per engine (cells citing you / ok cells, citations):")
+    print("\nPer engine, ok cells only (cells citing you, citations, cells mentioning you):")
+    print(f"  {'engine':14s}  {'cite you':>11s}  {'cites':>5s}  {'mention you':>11s}")
     for engine, d in summary["engines"].items():
         failed = f"  ({d['failed']} failed, not counted)" if d["failed"] else ""
-        print(
+        cm = d["cells_mentioning"]
+        mention = f"{cm:4d} / {d['ok']:<4d}" if cm is not None else f"{'-':>4s}{'':7s}"
+        line = (
             f"  {engine:14s}  {d['cells_citing_self']:4d} / {d['ok']:<4d}"
-            f"  {d['self_citations']:4d}{failed}"
+            f"  {d['self_citations']:5d}  {mention}{failed}"
         )
+        print(line.rstrip())
 
     print(f"\nTop {len(summary['top_domains'])} cited domains:")
     for r in summary["top_domains"]:

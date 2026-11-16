@@ -6,17 +6,19 @@ from pathlib import Path
 
 import pytest
 
+from geo_tracker.mentions import Brand, find_mentions
 from geo_tracker.parser import parse_citations
 from geo_tracker.reparse import reparse
 from geo_tracker.storage import connect, record_event, start_parse, start_run
-from geo_tracker.summarize import summarize_run
+from geo_tracker.summarize import print_summary, summarize_run
 from conftest import make_raw
 from test_storage import make_v01_db
 
 
-def _seed(db: Path, self_domains: set[str]) -> int:
+def _seed(db: Path, self_domains: set[str], brands: list[Brand] | None = None) -> int:
     run_id = start_run(db, label="w1", config={})
-    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=self_domains)
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=self_domains,
+                           brands=brands)
     cells = [
         ("perplexity", "ok", make_raw("https://example.com/a", "https://other.com/b"),
          "Acme on acme.io"),
@@ -29,6 +31,7 @@ def _seed(db: Path, self_domains: set[str]) -> int:
             fetch_status=status, fetch_error=None if status == "ok" else "HTTP 500",
             response_text=text, raw_response=raw, latency_ms=1,
             citations=parse_citations(raw, self_domains) if status == "ok" else [],
+            mentions=find_mentions(text, brands or []) if status == "ok" else [],
         )
     return run_id
 
@@ -41,9 +44,12 @@ def test_summary_counts_failed_cells_apart(db: Path):
     run_id = _seed(db, {"example.com"})
     s = summarize_run(db, run_id)
     assert s["engines"]["perplexity"] == {
-        "ok": 1, "failed": 0, "cells_citing_self": 1, "self_citations": 1}
+        "ok": 1, "failed": 0, "cells_citing_self": 1, "self_citations": 1,
+        "cells_mentioning": None}
     assert s["engines"]["openai"] == {
-        "ok": 1, "failed": 1, "cells_citing_self": 0, "self_citations": 0}
+        "ok": 1, "failed": 1, "cells_citing_self": 0, "self_citations": 0,
+        "cells_mentioning": None}
+    assert s["brands"] is None
     assert _domains(s) == {"other.com": 2, "example.com": 1}
 
 
@@ -140,3 +146,77 @@ def test_reparse_without_brands_records_not_measured(db: Path, self_domains_file
     with connect(db) as conn:
         assert conn.execute("SELECT brands_json FROM parses WHERE id = ?",
                             (result["parse_id"],)).fetchone()[0] is None
+
+
+ACME = [Brand(name="Acme", aliases=("Acme", "acme.io"))]
+
+
+def test_summary_counts_mentions_in_ok_cells_only(db: Path):
+    """The failed openai cell says "Acme" but must not count as a mention."""
+    run_id = _seed(db, {"example.com"}, brands=ACME)
+    s = summarize_run(db, run_id)
+    assert s["brands"] == ["Acme"]
+    assert s["engines"]["perplexity"]["cells_mentioning"] == 1
+    assert s["engines"]["openai"]["cells_mentioning"] == 0
+    assert s["engines"]["openai"]["failed"] == 1
+
+
+def test_summary_mentions_follow_the_latest_parse(db: Path, self_domains_file: Path,
+                                                  tmp_path: Path):
+    run_id = _seed(db, {"example.com"}, brands=ACME)
+    brands = tmp_path / "brands.yaml"
+    brands.write_text("- Acme\n", encoding="utf-8")
+    reparse(db, self_domains_file, brands_path=brands)
+    reparse(db, self_domains_file, brands_path=brands)
+    s = summarize_run(db, run_id)
+    assert {e: d["cells_mentioning"] for e, d in s["engines"].items()} == {
+        "perplexity": 1, "openai": 0}
+    brands.write_text("- Globex\n", encoding="utf-8")
+    reparse(db, self_domains_file, run_id=run_id, brands_path=brands)
+    s = summarize_run(db, run_id)
+    assert {e: d["cells_mentioning"] for e, d in s["engines"].items()} == {
+        "perplexity": 0, "openai": 1}
+    reparse(db, self_domains_file)  # no brands: the latest parse did not measure
+    s = summarize_run(db, run_id)
+    assert s["brands"] is None
+    assert s["engines"]["openai"]["cells_mentioning"] is None
+
+
+def test_summary_counts_a_cell_once_for_many_mentions(db: Path):
+    run_id = start_run(db, label=None, config={})
+    brands = ACME + [Brand(name="Globex", aliases=("Globex",))]
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=[], brands=brands)
+    text = "Acme, acme.io and Globex."
+    record_event(db, run_id=run_id, parse_id=parse_id, prompt="p", engine="openai", model="m",
+                 fetch_status="ok", fetch_error=None, response_text=text, raw_response={},
+                 latency_ms=1, mentions=find_mentions(text, brands))
+    assert summarize_run(db, run_id)["engines"]["openai"]["cells_mentioning"] == 1
+
+
+def test_v01_run_shows_mentions_as_not_measured(tmp_path: Path):
+    db = make_v01_db(tmp_path / "old.db")
+    s = summarize_run(db, 1)
+    assert s["brands"] is None
+    assert s["engines"]["perplexity"]["cells_mentioning"] is None
+
+
+def test_print_summary_shows_mentions_next_to_citations(db: Path,
+                                                         capsys: pytest.CaptureFixture[str]):
+    run_id = _seed(db, {"example.com"}, brands=ACME)
+    print_summary(summarize_run(db, run_id))
+    out = capsys.readouterr().out
+    assert "brands: Acme" in out
+    lines = {ln.split()[0]: ln for ln in out.splitlines() if ln.startswith("  ") and "/" in ln}
+    assert lines["openai"].split()[1:] == ["0", "/", "1", "0", "0", "/", "1",
+                                           "(1", "failed,", "not", "counted)"]
+    assert lines["perplexity"].split()[1:] == ["1", "/", "1", "1", "1", "/", "1"]
+
+
+def test_print_summary_marks_mentions_not_measured(db: Path,
+                                                    capsys: pytest.CaptureFixture[str]):
+    run_id = _seed(db, {"example.com"})
+    print_summary(summarize_run(db, run_id))
+    out = capsys.readouterr().out
+    assert "brands: not measured" in out
+    perplexity = next(ln for ln in out.splitlines() if ln.startswith("  perplexity") and "/" in ln)
+    assert perplexity.split()[1:] == ["1", "/", "1", "1", "-"]
