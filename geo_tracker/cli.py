@@ -1,4 +1,8 @@
-"""CLI: geo-tracker {init,run,summary}."""
+"""CLI: geo-tracker {init,run,summary,reparse}.
+
+Exit codes: 0 success, 1 a run with failed cells or a runtime error,
+2 bad input (flags, config files, missing key).
+"""
 
 from __future__ import annotations
 
@@ -8,9 +12,10 @@ import json
 import sys
 from pathlib import Path
 
-from geo_tracker.config import load_env
 from geo_tracker import reparse as reparse_mod
 from geo_tracker import runner, storage, summarize
+from geo_tracker.adapters import ENGINE_NAMES, select_engines
+from geo_tracker.config import load_env
 
 DEFAULT_DB = Path("geo-tracker.db")
 DEFAULT_PROMPTS = Path("prompts.yaml")
@@ -42,10 +47,15 @@ OPENROUTER_API_KEY=
 """
 
 
+def _fail(message: str, code: int) -> int:
+    print(f"ERROR: {message}", file=sys.stderr)
+    return code
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     target = Path(args.dir or ".")
     target.mkdir(parents=True, exist_ok=True)
-    written = []
+    written: list[str] = []
     for name, content in (
         ("prompts.yaml", INIT_PROMPTS),
         ("self_domains.yaml", INIT_SELF),
@@ -70,40 +80,53 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     if args.concurrent < 1:
-        print(
-            f"ERROR: --concurrent must be >= 1 (got {args.concurrent})", file=sys.stderr
-        )
-        return 2
+        return _fail(f"--concurrent must be >= 1 (got {args.concurrent})", 2)
+    engines = [e.strip() for e in args.engines.split(",") if e.strip()] if args.engines else None
+    try:
+        select_engines(engines)
+    except ValueError as exc:
+        return _fail(str(exc), 2)
     load_env(Path(args.env) if args.env else None)
-    summary = asyncio.run(
-        runner.run(
-            db_path=Path(args.db),
-            prompts_path=Path(args.prompts),
-            self_domains_path=Path(args.self_domains),
-            label=args.label,
-            engines=args.engines.split(",") if args.engines else None,
-            max_concurrent=args.concurrent,
+    try:
+        summary = asyncio.run(
+            runner.run(
+                db_path=Path(args.db),
+                prompts_path=Path(args.prompts),
+                self_domains_path=Path(args.self_domains),
+                label=args.label,
+                engines=engines,
+                max_concurrent=args.concurrent,
+            )
         )
-    )
+    except (FileNotFoundError, ValueError) as exc:
+        return _fail(str(exc), 2)
     print(json.dumps(summary, indent=2))
+    if summary["failed_cells"]:
+        return _fail(
+            f"{summary['failed_cells']} of {summary['total_cells']} cells failed. "
+            "They are in the ledger with their error.",
+            1,
+        )
     return 0
 
 
 def cmd_summary(args: argparse.Namespace) -> int:
     summary = summarize.summarize_run(Path(args.db), run_id=args.run_id)
     if "error" in summary:
-        print(f"ERROR: {summary['error']}", file=sys.stderr)
-        return 1
+        return _fail(summary["error"], 1)
     summarize.print_summary(summary)
     return 0
 
 
 def cmd_reparse(args: argparse.Namespace) -> int:
-    result = reparse_mod.reparse(
-        Path(args.db),
-        Path(args.self_domains),
-        run_id=args.run_id,
-    )
+    db = Path(args.db)
+    if not db.exists():
+        return _fail(f"database not found: {db}", 1)
+    try:
+        storage.init_db(db)
+        result = reparse_mod.reparse(db, Path(args.self_domains), run_id=args.run_id)
+    except (FileNotFoundError, ValueError) as exc:
+        return _fail(f"{exc} (nothing was written)", 2)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 
@@ -123,14 +146,15 @@ def main(argv: list[str] | None = None) -> int:
     pi.add_argument("--force", action="store_true", help="Overwrite existing files")
     pi.set_defaults(func=cmd_init)
 
-    pr = sub.add_parser(
-        "run", help="Query all engines for all prompts; write to ledger"
-    )
+    pr = sub.add_parser("run", help="Query all engines for all prompts; write to ledger")
     pr.add_argument("--db", default=str(DEFAULT_DB))
     pr.add_argument("--prompts", default=str(DEFAULT_PROMPTS))
     pr.add_argument("--self-domains", default=str(DEFAULT_SELF))
-    pr.add_argument("--label", help="Free-text label for this run (e.g., '2026-W21')")
-    pr.add_argument("--engines", help="Comma-separated subset (default: all four)")
+    pr.add_argument("--label", help="Free-text label for this run (e.g., '2026-W47')")
+    pr.add_argument(
+        "--engines",
+        help=f"Comma-separated subset of: {','.join(ENGINE_NAMES)} (default: all)",
+    )
     pr.add_argument("--concurrent", type=int, default=5)
     pr.add_argument("--env", help="Path to .env file (default: ./.env)")
     pr.set_defaults(func=cmd_run)
@@ -142,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
 
     prep = sub.add_parser(
         "reparse",
-        help="Re-extract citations from historical raw responses using the current parser + self_domains",
+        help="Re-extract citations from stored raw responses with the current parser and self_domains",
     )
     prep.add_argument("--db", default=str(DEFAULT_DB))
     prep.add_argument("--self-domains", default=str(DEFAULT_SELF))

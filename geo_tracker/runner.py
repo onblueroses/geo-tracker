@@ -1,8 +1,9 @@
 """Run all (prompt, engine) cells for a configuration.
 
 Concurrency: one task per cell, capped by `max_concurrent` (default 5).
-Failures are NOT retried automatically — each cell produces exactly one event
-row (ok / error / timeout) and the runner moves on. Re-run to retry.
+geo-tracker does not retry a failed cell. Each cell produces exactly one
+event row (ok, error, timeout or parse_error) and the runner moves on.
+Re-run to retry.
 """
 
 from __future__ import annotations
@@ -11,17 +12,32 @@ import asyncio
 import logging
 import traceback
 from pathlib import Path
+from typing import Any
 
 import yaml
 
-from geo_tracker.adapters import ALL_ADAPTERS, OpenRouterClient
-from geo_tracker.parser import extract_domain, parse_citations
-from geo_tracker.storage import init_db, insert_citations, insert_event, start_run
+from geo_tracker.adapters import (
+    Adapter,
+    EngineAdapter,
+    EventPayload,
+    OpenRouterClient,
+    select_engines,
+)
+from geo_tracker.parser import (
+    PARSER_VERSION,
+    Citation,
+    normalize_self_domains,
+    parse_citations,
+)
+from geo_tracker.storage import init_db, record_event, start_parse, start_run
 
 log = logging.getLogger("geo_tracker.runner")
 
+STATUSES = ("ok", "error", "timeout", "parse_error")
+FAILED_STATUSES = frozenset(STATUSES) - {"ok"}
 
-def _load_yaml_list(path: Path) -> list:
+
+def load_yaml_list(path: Path) -> list[Any]:
     if not path.exists():
         raise FileNotFoundError(f"missing config file: {path}")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -32,57 +48,92 @@ def _load_yaml_list(path: Path) -> list:
     return data
 
 
+def load_prompts(path: Path) -> list[str]:
+    """Load prompts. Reject an empty list or an entry that is not text."""
+    prompts: list[str] = []
+    for i, item in enumerate(load_yaml_list(path)):
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{path}: entry {i} is not a non-empty string: {item!r}")
+        prompts.append(item.strip())
+    if not prompts:
+        raise ValueError(f"{path} has no prompts")
+    return prompts
+
+
+def load_self_domains(path: Path) -> set[str]:
+    return normalize_self_domains(load_yaml_list(path))
+
+
+def _describe(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[:1000]}"
+
+
 async def _run_cell(
     db_path: Path,
     run_id: int,
-    adapter,
+    parse_id: int,
+    adapter: Adapter,
     prompt: str,
     self_domains: set[str],
     sem: asyncio.Semaphore,
 ) -> tuple[str, str, int]:
     """Run one cell. Returns (engine, fetch_status, n_citations).
 
-    Wrapped in a top-level try/except so any unexpected exception (parser bug,
-    adapter shape change, sqlite failure) still produces an `error` row.
+    The cell fails closed. An adapter exception becomes an `error` row. A
+    parser exception becomes a `parse_error` row that keeps the raw response.
+    A storage failure rolls back and leaves an `error` row in its place.
     """
     async with sem:
         try:
             event = await adapter.query(prompt)
-            event_id = insert_event(
+        except Exception as exc:
+            event = EventPayload(
+                response_text="", fetch_status="error", fetch_error=_describe(exc)
+            )
+
+        status: str = event.fetch_status
+        error = event.fetch_error
+        citations: list[Citation] = []
+        if status == "ok":
+            try:
+                citations = parse_citations(event.raw_response, self_domains)
+            except Exception as exc:
+                status, error = "parse_error", _describe(exc)
+
+        try:
+            record_event(
                 db_path,
                 run_id=run_id,
+                parse_id=parse_id,
                 prompt=prompt,
                 engine=adapter.name,
                 model=adapter.model,
-                fetch_status=event.fetch_status,
-                fetch_error=event.fetch_error,
+                fetch_status=status,
+                fetch_error=error,
                 response_text=event.response_text,
                 raw_response=event.raw_response,
                 latency_ms=event.latency_ms,
+                citations=citations,
             )
-            n_cites = 0
-            if event.fetch_status == "ok":
-                citations = parse_citations(event.raw_response, self_domains)
-                n_cites = insert_citations(db_path, event_id, citations)
-            return adapter.name, event.fetch_status, n_cites
         except Exception as exc:
-            err = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[:1000]}"
             try:
-                insert_event(
+                record_event(
                     db_path,
                     run_id=run_id,
+                    parse_id=parse_id,
                     prompt=prompt,
                     engine=adapter.name,
                     model=adapter.model,
                     fetch_status="error",
-                    fetch_error=err,
+                    fetch_error=f"storage failed: {_describe(exc)}",
                     response_text="",
                     raw_response={},
-                    latency_ms=0,
+                    latency_ms=event.latency_ms,
                 )
             except Exception:
                 log.exception("failed to record error event for %s", adapter.name)
             return adapter.name, "error", 0
+        return adapter.name, status, len(citations)
 
 
 async def run(
@@ -92,47 +143,35 @@ async def run(
     label: str | None = None,
     engines: list[str] | None = None,
     max_concurrent: int = 5,
-) -> dict:
+) -> dict[str, Any]:
+    prompts = load_prompts(prompts_path)
+    self_domains = load_self_domains(self_domains_path)
+    selected = select_engines(engines)
+
     init_db(db_path)
-    prompts = _load_yaml_list(prompts_path)
-    self_domains_list = _load_yaml_list(self_domains_path)
-    # Normalize via extract_domain so we handle full URLs in self_domains.yaml
-    # too, and so 'www.' is stripped as a prefix (not a char set — `lstrip("www.")`
-    # would mangle "walmart.com" to "almart.com").
-    self_domains: set[str] = set()
-    for d in self_domains_list:
-        s = str(d).strip().lower()
-        if s.startswith("http://") or s.startswith("https://"):
-            s = extract_domain(s)
-        elif s.startswith("www."):
-            s = s[4:]
-        if s:
-            self_domains.add(s)
-
     client = OpenRouterClient()
-    adapters = []
-    for cls in ALL_ADAPTERS:
-        if engines and cls.name not in engines:
-            continue
-        adapters.append(cls(client))
-
-    if not adapters:
-        raise ValueError(f"no adapters selected (engines filter: {engines!r})")
+    adapters: list[Adapter] = [EngineAdapter(e, client) for e in selected]
 
     run_id = start_run(
         db_path,
         label=label,
         config={
             "n_prompts": len(prompts),
-            "n_engines": len(adapters),
+            "engines": {a.name: a.model for a in adapters},
             "self_domains": sorted(self_domains),
             "max_concurrent": max_concurrent,
         },
     )
+    parse_id = start_parse(
+        db_path,
+        run_id=run_id,
+        parser_version=PARSER_VERSION,
+        self_domains=self_domains,
+    )
 
     sem = asyncio.Semaphore(max_concurrent)
     tasks = [
-        _run_cell(db_path, run_id, adapter, prompt, self_domains, sem)
+        _run_cell(db_path, run_id, parse_id, adapter, prompt, self_domains, sem)
         for prompt in prompts
         for adapter in adapters
     ]
@@ -143,17 +182,18 @@ async def run(
 
     by_engine: dict[str, dict[str, int]] = {}
     total_cites = 0
+    failed = 0
     for engine, status, n_cites in results:
-        d = by_engine.setdefault(
-            engine, {"ok": 0, "error": 0, "timeout": 0, "citations": 0}
-        )
+        d = by_engine.setdefault(engine, {s: 0 for s in STATUSES} | {"citations": 0})
         d[status] += 1
         d["citations"] += n_cites
         total_cites += n_cites
+        failed += status in FAILED_STATUSES
 
     return {
         "run_id": run_id,
         "total_cells": len(tasks),
+        "failed_cells": failed,
         "total_citations": total_cites,
         "by_engine": by_engine,
     }

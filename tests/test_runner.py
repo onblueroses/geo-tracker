@@ -1,89 +1,104 @@
-"""Regression tests for findings Codex flagged on v0.1.0."""
+"""Runner: one fail-closed event row per cell. No network calls."""
+
+from __future__ import annotations
 
 import asyncio
-import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
+import pytest
 
-from geo_tracker.parser import extract_domain
-from geo_tracker.reparse import _normalize_self_domains
-
-
-def test_self_domain_normalization_preserves_words_starting_with_w():
-    """Regression: `.lstrip("www.")` ate the 'w', 'a', 'l' from "walmart.com".
-
-    `lstrip` strips a CHAR SET, not a prefix string. Use removeprefix or
-    extract_domain instead.
-    """
-    raw = ["walmart.com", "webflow.com", "www2.example.com", "www.example.com"]
-    norm = _normalize_self_domains(raw)
-    assert "walmart.com" in norm  # was "almart.com" with lstrip
-    assert "webflow.com" in norm  # was "ebflow.com"
-    assert "www2.example.com" in norm  # was "2.example.com"
-    assert "example.com" in norm  # www. correctly stripped
+from geo_tracker import runner
+from geo_tracker.adapters import EventPayload
+from geo_tracker.storage import connect, start_parse, start_run
+from conftest import make_raw
 
 
-def test_self_domain_normalization_accepts_full_urls():
-    raw = ["https://docs.example.com/api", "http://www.example.com"]
-    norm = _normalize_self_domains(raw)
-    assert "docs.example.com" in norm
-    assert "example.com" in norm
+class FakeAdapter:
+    name = "fake"
+    model = "fake-model"
+
+    def __init__(self, result: EventPayload | Exception) -> None:
+        self.result = result
+
+    async def query(self, prompt: str) -> EventPayload:
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
 
 
-def test_extract_domain_consistency():
-    """extract_domain is the canonical normalizer; both runner and reparse use it."""
-    assert extract_domain("https://www.walmart.com/foo") == "walmart.com"
-    assert extract_domain("https://www.webflow.com") == "webflow.com"
+def _run_cell(db: Path, adapter: FakeAdapter) -> tuple[tuple[str, str, int], list[Any]]:
+    run_id = start_run(db, label="t", config={})
+    parse_id = start_parse(db, run_id=run_id, parser_version=1, self_domains=["example.com"])
+    result = asyncio.run(
+        runner._run_cell(db, run_id, parse_id, adapter, "p", {"example.com"},
+                         asyncio.Semaphore(1))
+    )
+    with connect(db) as conn:
+        rows = conn.execute(
+            "SELECT fetch_status, fetch_error, raw_response_json FROM events WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+    return result, rows
 
 
-def test_run_inserts_error_row_on_unexpected_exception():
-    """Codex finding: a parser/storage exception inside _run_cell should still
-    produce a row, not silently lose the cell."""
-    from geo_tracker import runner as runner_mod
-    from geo_tracker.adapters.base import EventPayload
-    from geo_tracker.storage import connect, init_db
+def test_ok_cell_writes_event_and_citations(db: Path):
+    ok = EventPayload(response_text="x", raw_response=make_raw("https://example.com/a"),
+                      fetch_status="ok")
+    (engine, status, n), rows = _run_cell(db, FakeAdapter(ok))
+    assert (engine, status, n) == ("fake", "ok", 1)
+    assert [r["fetch_status"] for r in rows] == ["ok"]
 
-    class _FakeAdapter:
-        name = "fake"
-        model = "fake-model"
 
-        async def query(self, prompt):
-            return EventPayload(
-                response_text="x",
-                raw_response={"will": "crash parser"},
-                latency_ms=10,
-                fetch_status="ok",
-            )
+def test_parse_failure_writes_one_parse_error_row(db: Path):
+    """Regression: a parser crash left an `ok` row with zero citations plus an
+    `error` row. The `ok` row read as "answered, cited nothing"."""
+    ok = EventPayload(response_text="x", raw_response=make_raw("https://example.com/a"),
+                      fetch_status="ok")
+    with patch("geo_tracker.runner.parse_citations", side_effect=RuntimeError("boom")):
+        (_, status, n), rows = _run_cell(db, FakeAdapter(ok))
+    assert (status, n) == ("parse_error", 0)
+    assert [r["fetch_status"] for r in rows] == ["parse_error"]
+    assert "boom" in rows[0]["fetch_error"]
+    assert "example.com" in rows[0]["raw_response_json"]  # kept for inspection
 
-    with tempfile.TemporaryDirectory() as td:
-        db = Path(td) / "t.db"
-        init_db(db)
-        from geo_tracker.storage import start_run
 
-        run_id = start_run(db, label="t", config={})
-        sem = asyncio.Semaphore(1)
+def test_adapter_exception_writes_error_row(db: Path):
+    (_, status, _), rows = _run_cell(db, FakeAdapter(RuntimeError("adapter broke")))
+    assert status == "error"
+    assert [r["fetch_status"] for r in rows] == ["error"]
+    assert "adapter broke" in rows[0]["fetch_error"]
 
-        # Patch parse_citations to raise.
-        with patch(
-            "geo_tracker.runner.parse_citations", side_effect=RuntimeError("boom")
-        ):
-            engine, status, n = asyncio.run(
-                runner_mod._run_cell(
-                    db, run_id, _FakeAdapter(), "p", {"example.com"}, sem
-                )
-            )
-        assert engine == "fake"
-        assert status == "error"
-        with connect(db) as conn:
-            rows = conn.execute(
-                "SELECT engine, fetch_status, fetch_error FROM events WHERE run_id=?",
-                (run_id,),
-            ).fetchall()
-        # First row = ok insert before the exception, second = error fallback.
-        # Or just the error row, depending on where the patch lands.
-        # The contract: at least one error row exists for this cell.
-        assert any(
-            r["fetch_status"] == "error" and "boom" in (r["fetch_error"] or "")
-            for r in rows
-        )
+
+def test_storage_failure_falls_back_to_error_row(db: Path):
+    ok = EventPayload(response_text="x", raw_response=make_raw("https://example.com/a"),
+                      fetch_status="ok")
+    real = runner.record_event
+    calls = {"n": 0}
+
+    def flaky(*args: Any, **kwargs: Any) -> int:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk full")
+        return real(*args, **kwargs)
+
+    with patch("geo_tracker.runner.record_event", side_effect=flaky):
+        (_, status, n), rows = _run_cell(db, FakeAdapter(ok))
+    assert (status, n) == ("error", 0)
+    assert [r["fetch_status"] for r in rows] == ["error"]
+    assert "disk full" in rows[0]["fetch_error"]
+
+
+def test_load_prompts_rejects_bad_entries(tmp_path: Path):
+    p = tmp_path / "prompts.yaml"
+    p.write_text("- good question\n- 42\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="entry 1"):
+        runner.load_prompts(p)
+    p.write_text("[]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no prompts"):
+        runner.load_prompts(p)
+    p.write_text("prompts:\n  - '  padded  '\n", encoding="utf-8")
+    assert runner.load_prompts(p) == ["padded"]
+    with pytest.raises(FileNotFoundError):
+        runner.load_prompts(tmp_path / "missing.yaml")

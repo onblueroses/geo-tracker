@@ -1,27 +1,27 @@
-"""LLM answer-engine adapters. All routed through OpenRouter."""
+"""LLM answer-engine adapters. All go through OpenRouter."""
 
-from geo_tracker.adapters.base import EngineAdapter, EventPayload, OpenRouterClient
+from geo_tracker.adapters.base import (
+    Adapter,
+    EventPayload,
+    OpenRouterClient,
+    classify_response,
+)
 from geo_tracker.adapters.engines import (
-    AnthropicAdapter,
-    GeminiAdapter,
-    OpenAIAdapter,
-    PerplexityAdapter,
+    ENGINE_NAMES,
+    ENGINES,
+    Engine,
+    EngineAdapter,
+    select_engines,
 )
 
 __all__ = [
+    "Adapter",
+    "ENGINE_NAMES",
+    "ENGINES",
+    "Engine",
     "EngineAdapter",
     "EventPayload",
     "OpenRouterClient",
-    "AnthropicAdapter",
-    "GeminiAdapter",
-    "OpenAIAdapter",
-    "PerplexityAdapter",
-    "ALL_ADAPTERS",
+    "classify_response",
+    "select_engines",
 ]
-
-ALL_ADAPTERS = (
-    PerplexityAdapter,
-    OpenAIAdapter,
-    AnthropicAdapter,
-    GeminiAdapter,
-)
