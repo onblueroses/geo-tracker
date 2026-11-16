@@ -13,6 +13,8 @@ For each prompt in your list, geo-tracker does these steps:
 
 A failed call gets its own row with the error. geo-tracker never counts a failed call as an answer that does not cite you.
 
+The output below is an illustration with example domains, not a real run.
+
 ```text
 $ geo-tracker init && geo-tracker run --label baseline && geo-tracker summary
 
