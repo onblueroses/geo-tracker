@@ -11,7 +11,7 @@ import os
 import time
 from typing import Any, Literal, Protocol
 
-from openai import APITimeoutError, AsyncOpenAI, OpenAIError, Timeout
+from openai import APITimeoutError, AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -70,16 +70,17 @@ class OpenRouterClient:
 
     The OpenAI SDK retries connection errors, 429 and 5xx responses with its
     default policy. A cell that still fails after that is recorded as failed.
+    Timeouts are the SDK defaults (10 minutes per request):
+    https://github.com/openai/openai-python#timeouts
     """
 
-    def __init__(self, timeout: float = 60.0) -> None:
+    def __init__(self) -> None:
         api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             raise RuntimeError("OPENROUTER_API_KEY missing in env")
         self._client = AsyncOpenAI(
             base_url=OPENROUTER_BASE_URL,
             api_key=api_key,
-            timeout=Timeout(timeout, connect=10.0),
         )
 
     async def chat_completion(self, model: str, prompt: str) -> EventPayload:

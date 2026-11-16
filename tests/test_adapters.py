@@ -88,9 +88,9 @@ def test_client_keeps_openrouter_citation_fields(monkeypatch: pytest.MonkeyPatch
 
 def test_client_records_transport_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
-    client = OpenRouterClient(timeout=2)
+    client = OpenRouterClient()
     client._client = client._client.with_options(
-        base_url="http://127.0.0.1:9/v1", max_retries=0
+        base_url="http://127.0.0.1:9/v1", max_retries=0, timeout=2
     )
     event = asyncio.run(client.chat_completion("m", "p"))
     assert event.fetch_status in ("error", "timeout")

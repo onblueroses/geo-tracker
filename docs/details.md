@@ -29,7 +29,7 @@ The model list no longer has `anthropic/claude-3.5-haiku`. To change a model, ed
 
 ## Bedrock
 
-`--provider bedrock` sends each prompt to the Bedrock Converse API through boto3. It does not use OpenRouter or `OPENROUTER_API_KEY`.
+`--provider bedrock` sends each prompt to the Bedrock Converse API through boto3. It does not use OpenRouter or `OPENROUTER_API_KEY`. Install it with `pip install -e '.[bedrock]'`. The extra asks for boto3 1.44 or newer. 1.44 is the version we tested, not a measured minimum.
 
 - bedrock-anthropic (`us.anthropic.claude-haiku-5-5`) and bedrock-openai (`us.openai.gpt-6-luna`) get no search tool. They answer from model memory. A memory answer has no citations. Its mention count tells you if the model knows your brand without a search. It does not tell you what a search engine finds.
 - bedrock-nova (`us.amazon.nova-2-lite-v1:0`) gets the `nova_grounding` system tool. Nova decides when to search. The citations come back as `citationsContent` blocks, and the parser reads them (`PARSER_VERSION` 2).
@@ -154,7 +154,7 @@ geo-tracker fails closed. It records a failure as a failure, never as an answer 
 - `error`: the API call failed, the response had an error, or the answer text was empty.
 - `parse_error`: the parser or the brand matcher failed. The row keeps the raw response for inspection.
 
-The OpenAI SDK retries connection errors, rate limits and server errors with its default policy. For Bedrock, botocore retries with its default policy. geo-tracker does not retry a cell after that. Re-run to retry.
+The OpenAI SDK retries connection errors, rate limits and server errors with its default policy. geo-tracker sets no timeout of its own. A request to OpenRouter times out after the [OpenAI SDK default](https://github.com/openai/openai-python#timeouts) of 10 minutes. For Bedrock, botocore retries and times out with its [defaults](https://docs.aws.amazon.com/botocore/latest/reference/config.html). geo-tracker does not retry a cell after that. Re-run to retry.
 
 `reparse` also fails closed. If one stored response does not decode or parse, the whole reparse rolls back.
 
