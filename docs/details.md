@@ -27,6 +27,20 @@ We checked the model IDs against the [OpenRouter model list](https://openrouter.
 
 The model list no longer has `anthropic/claude-3.5-haiku`. To change a model, edit `ENGINES` in `geo_tracker/adapters/engines.py`. Each event row stores the model it used, so a model change stays visible in the ledger.
 
+## Bedrock
+
+`--provider bedrock` sends each prompt to the Bedrock Converse API through boto3. It does not use OpenRouter or `OPENROUTER_API_KEY`.
+
+- bedrock-anthropic (`us.anthropic.claude-haiku-5-5`) and bedrock-openai (`us.openai.gpt-6-luna`) get no search tool. They answer from model memory. A memory answer has no citations. Its mention count tells you if the model knows your brand without a search. It does not tell you what a search engine finds.
+- bedrock-nova (`us.amazon.nova-2-lite-v1:0`) gets the `nova_grounding` system tool. Nova decides when to search. The citations come back as `citationsContent` blocks, and the parser reads them (`PARSER_VERSION` 2).
+- The answer text is the text blocks of the answer, in order. Reasoning, tool and citation blocks are not answer text.
+- A stop reason other than `end_turn`, `stop_sequence` or `max_tokens` is an error row. Examples are `guardrail_intervened`, `content_filtered` and `tool_use`.
+- An empty answer is an error row, as for OpenRouter.
+
+boto3 finds credentials and the region with its usual chain. `run` stops with exit code 2 if it finds no credentials or no region. Timeouts and retries are the [botocore defaults](https://docs.aws.amazon.com/botocore/latest/reference/config.html). A read timeout is a `timeout` row.
+
+The model IDs are US cross-region inference profiles. We checked them with `aws bedrock list-foundation-models` and `list-inference-profiles` in us-east-2 on 2026-11-16. To change a model, edit `ENGINES` in `geo_tracker/adapters/engines.py`. Bedrock bills by token, and web grounding can have its own fee. Check the [Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/) before a large sweep.
+
 ## Cost
 
 One API key (OpenRouter) covers all four engines. The model list gives these search fees for each request on 2026-11-16:
@@ -111,9 +125,11 @@ geo-tracker summary --run-id 3                  # specific run
 geo-tracker reparse                             # re-extract citations from old raw responses
 geo-tracker reparse --run-id 3                  # ...for one run only
 geo-tracker run --brands brands/acme.yaml       # brands file (default ./brands.yaml)
+geo-tracker run --provider bedrock              # Bedrock engines (default: openrouter)
+geo-tracker run --provider bedrock --engines bedrock-nova
 ```
 
-`--engines` rejects a name that it does not know. It does not skip the name.
+`--engines` rejects a name that it does not know. It does not skip the name. It also rejects an engine of a different provider.
 
 Run `reparse` after you edit `self_domains.yaml` or `brands.yaml`, or increase `parser.PARSER_VERSION`. It reads the stored responses and runs the current parser and matcher. Then it appends one new parse with its citation and mention rows. The old rows stay. `summary` always uses the latest parse of a run, so it does not count a citation or a mention twice.
 
@@ -138,7 +154,7 @@ geo-tracker fails closed. It records a failure as a failure, never as an answer 
 - `error`: the API call failed, the response had an error, or the answer text was empty.
 - `parse_error`: the parser or the brand matcher failed. The row keeps the raw response for inspection.
 
-The OpenAI SDK retries connection errors, rate limits and server errors with its default policy. geo-tracker does not retry a cell after that. Re-run to retry.
+The OpenAI SDK retries connection errors, rate limits and server errors with its default policy. For Bedrock, botocore retries with its default policy. geo-tracker does not retry a cell after that. Re-run to retry.
 
 `reparse` also fails closed. If one stored response does not decode or parse, the whole reparse rolls back.
 

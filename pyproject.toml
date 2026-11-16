@@ -10,7 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 authors = [{ name = "onblueroses" }]
-keywords = ["geo", "aeo", "llm", "seo", "openrouter", "perplexity", "answer-engines"]
+keywords = ["geo", "aeo", "llm", "seo", "openrouter", "bedrock", "perplexity", "answer-engines"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -29,7 +29,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+bedrock = ["boto3>=1.44"]
+dev = ["pytest>=8", "boto3>=1.44"]
 
 [project.scripts]
 geo-tracker = "geo_tracker.cli:main"

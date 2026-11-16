@@ -50,6 +50,20 @@ We checked these IDs against the [OpenRouter model list](https://openrouter.ai/a
 
 One OpenRouter key covers all four engines. [Cost](docs/details.md#cost) gives the search fees.
 
+## Bedrock engines
+
+OpenRouter is the default provider. `--provider bedrock` uses AWS Bedrock instead:
+
+| Engine | Bedrock model | Grounding |
+|--------|---------------|-----------|
+| bedrock-anthropic | `us.anthropic.claude-haiku-5-5` | none (model memory) |
+| bedrock-openai | `us.openai.gpt-6-luna` | none (model memory) |
+| bedrock-nova | `us.amazon.nova-2-lite-v1:0` | Nova web grounding |
+
+bedrock-anthropic and bedrock-openai do not search the web. They measure what the model knows from its training data, not what a search finds. Thus they give mention counts but no citations. Do not compare their citation counts with the search engines. bedrock-nova uses the `nova_grounding` web search tool of Bedrock and gives citations.
+
+The IDs are US cross-region inference profiles, so call them from a US region. We checked them with `aws bedrock list-inference-profiles` in us-east-2 on 2026-11-16. Your AWS account must have access to each model. [Bedrock](docs/details.md#bedrock) gives more detail.
+
 ## Install
 
 The package is not on PyPI yet. Install it from source (Python 3.11 or newer):
@@ -58,6 +72,7 @@ The package is not on PyPI yet. Install it from source (Python 3.11 or newer):
 git clone https://github.com/onblueroses/geo-tracker
 cd geo-tracker
 pip install -e .        # or: uv sync
+pip install -e '.[bedrock]'   # only for the Bedrock engines (adds boto3)
 ```
 
 ## Usage
@@ -71,11 +86,12 @@ $EDITOR .env                           # OPENROUTER_API_KEY=...
 geo-tracker run --label baseline       # query all engines for all prompts
 geo-tracker summary                    # citation and mention rollup for the latest run
 geo-tracker reparse                    # re-extract citations and mentions from stored responses
+geo-tracker run --provider bedrock     # the Bedrock engines, with your AWS credentials
 ```
 
 `run` exits with code 1 if one or more cells failed. The failed cells are in the ledger with their error. Re-run to retry them.
 
-Get an OpenRouter key at <https://openrouter.ai/keys>. [geo-tracker in detail](docs/details.md) gives all flags, a weekly cron entry, the schema and the reasons for the append-only design.
+Get an OpenRouter key at <https://openrouter.ai/keys>. The Bedrock engines need no key in `.env`. boto3 finds your AWS credentials and region with its usual chain (environment, `~/.aws` files, instance role). [geo-tracker in detail](docs/details.md) gives all flags, a weekly cron entry, the schema and the reasons for the append-only design.
 
 ## Development
 
@@ -84,7 +100,7 @@ uv sync --extra dev
 uv run pytest
 ```
 
-The tests make no network calls and use no API key.
+The tests make no network calls and use no API key. One live Bedrock test runs only with `GEO_TRACKER_LIVE_BEDROCK=1` and AWS credentials. `pytest -rs` shows why it skipped.
 
 ## Layout
 

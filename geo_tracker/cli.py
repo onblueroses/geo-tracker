@@ -14,7 +14,7 @@ from pathlib import Path
 
 from geo_tracker import reparse as reparse_mod
 from geo_tracker import runner, storage, summarize
-from geo_tracker.adapters import ENGINE_NAMES, select_engines
+from geo_tracker.adapters import DEFAULT_PROVIDER, ENGINES, PROVIDERS, select_engines
 from geo_tracker.config import load_env
 
 DEFAULT_DB = Path("geo-tracker.db")
@@ -52,9 +52,11 @@ INIT_BRANDS = """\
 """
 
 INIT_ENV = """\
-# OpenRouter routes all four answer engines through one API key.
-# Get a key: https://openrouter.ai/keys
+# OpenRouter (the default provider) routes all four answer engines through one
+# API key. Get a key: https://openrouter.ai/keys
 OPENROUTER_API_KEY=
+# With --provider bedrock, boto3 finds AWS credentials and the region with its
+# usual chain (env vars, ~/.aws files, instance role). No key goes here.
 """
 
 
@@ -111,10 +113,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         return _fail(f"--concurrent must be >= 1 (got {args.concurrent})", 2)
     engines = [e.strip() for e in args.engines.split(",") if e.strip()] if args.engines else None
     try:
-        select_engines(engines)
+        select_engines(engines, args.provider)
     except ValueError as exc:
         return _fail(str(exc), 2)
-    load_env(Path(args.env) if args.env else None)
+    load_env(Path(args.env) if args.env else None, args.provider)
     try:
         summary = asyncio.run(
             runner.run(
@@ -125,6 +127,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 engines=engines,
                 max_concurrent=args.concurrent,
                 brands_path=_brands_path(args.brands),
+                provider=args.provider,
             )
         )
     except (FileNotFoundError, ValueError) as exc:
@@ -185,8 +188,17 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("--brands", help=f"Brand names to find in answers (default: ./{DEFAULT_BRANDS})")
     pr.add_argument("--label", help="Free-text label for this run (e.g., '2026-W47')")
     pr.add_argument(
+        "--provider",
+        choices=PROVIDERS,
+        default=DEFAULT_PROVIDER,
+        help=f"Engine provider (default: {DEFAULT_PROVIDER})",
+    )
+    engine_help = "; ".join(
+        f"{p}: {','.join(e.name for e in ENGINES if e.provider == p)}" for p in PROVIDERS
+    )
+    pr.add_argument(
         "--engines",
-        help=f"Comma-separated subset of: {','.join(ENGINE_NAMES)} (default: all)",
+        help=f"Comma-separated subset of the provider's engines ({engine_help}). Default: all",
     )
     pr.add_argument("--concurrent", type=int, default=5)
     pr.add_argument("--env", help="Path to .env file (default: ./.env)")

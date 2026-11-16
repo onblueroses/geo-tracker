@@ -17,10 +17,10 @@ from typing import Any
 import yaml
 
 from geo_tracker.adapters import (
+    DEFAULT_PROVIDER,
     Adapter,
-    EngineAdapter,
     EventPayload,
-    OpenRouterClient,
+    build_adapters,
     select_engines,
 )
 from geo_tracker.mentions import Brand, Mention, find_mentions, load_brands
@@ -152,22 +152,23 @@ async def run(
     engines: list[str] | None = None,
     max_concurrent: int = 5,
     brands_path: Path | None = None,
+    provider: str = DEFAULT_PROVIDER,
 ) -> dict[str, Any]:
     """Run every cell. With `brands_path=None` the run does not measure mentions."""
     prompts = load_prompts(prompts_path)
     self_domains = load_self_domains(self_domains_path)
     brands = load_brands(brands_path) if brands_path is not None else None
-    selected = select_engines(engines)
+    selected = select_engines(engines, provider)
 
     init_db(db_path)
-    client = OpenRouterClient()
-    adapters: list[Adapter] = [EngineAdapter(e, client) for e in selected]
+    adapters: list[Adapter] = list(build_adapters(selected))
 
     run_id = start_run(
         db_path,
         label=label,
         config={
             "n_prompts": len(prompts),
+            "provider": provider,
             "engines": {a.name: a.model for a in adapters},
             "self_domains": sorted(self_domains),
             "brands": [b.name for b in brands] if brands is not None else None,

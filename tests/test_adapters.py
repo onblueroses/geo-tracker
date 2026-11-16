@@ -101,13 +101,27 @@ def test_select_engines_rejects_unknown_names():
     with pytest.raises(ValueError, match="openia"):
         select_engines(["openai", "openia"])
     assert [e.name for e in select_engines(["gemini", "openai"])] == ["openai", "gemini"]
-    assert select_engines(None) == list(ENGINES)
+
+
+def test_default_provider_is_openrouter():
+    assert select_engines(None) == [e for e in ENGINES if e.provider == "openrouter"]
+    assert [e.name for e in select_engines(None)] == ["perplexity", "openai", "anthropic", "gemini"]
+
+
+def test_select_engines_keeps_providers_apart():
+    with pytest.raises(ValueError, match="bedrock-nova"):
+        select_engines(["bedrock-nova"])  # a Bedrock engine under the default provider
+    with pytest.raises(ValueError, match="unknown provider"):
+        select_engines(None, "azure")
+    assert {e.provider for e in select_engines(None, "bedrock")} == {"bedrock"}
 
 
 def test_engine_table_shape():
     names = [e.name for e in ENGINES]
     assert len(names) == len(set(names))
     for e in ENGINES:
+        if e.provider == "bedrock":
+            continue
         assert re.fullmatch(r"[a-z0-9-]+/[a-z0-9.\-]+(:online)?", e.model), e.model
         if e.grounding == "native":
             assert not e.model.endswith(":online")
